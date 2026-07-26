@@ -1,7 +1,7 @@
 {
   "identity": {
     "language": {
-      "value": "Bengali",
+      "value": "Benglish",
       "updated": "2026-07-26"
     }
   },
@@ -9,5 +9,6 @@
   "projects": {},
   "relationships": {},
   "wishes": {},
-  "notes": {}
+  "notes": {},
+  "sessions": []
 }

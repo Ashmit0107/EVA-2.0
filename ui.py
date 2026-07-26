@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from pathlib import Path
 
 import psutil
@@ -24,9 +25,9 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
-    QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
+    QFontDatabase, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QRadialGradient, QShortcut,
-)
+)  # QLinearGradient already imported here
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
@@ -2539,19 +2540,81 @@ class MainWindow(QMainWindow):
 
         lay.addStretch()
 
-        for txt, col in [
-            ("AI CORE\nACTIVE",  C.GREEN),
-            ("SEC\nCLEARED",     C.PRI),
-            ("PROTOCOL\nXLIX",   C.TEXT_DIM),
-        ]:
-            lbl = QLabel(txt)
-            lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet(
-                f"color: {col}; background: {C.PANEL2};"
-                f"border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 4px;"
-            )
-            lay.addWidget(lbl)
+        social_row = QHBoxLayout()
+        social_row.setSpacing(6)
+
+        def _draw_instagram_icon(size: int) -> QPixmap:
+            px = QPixmap(size, size)
+            px.fill(Qt.GlobalColor.transparent)
+            p = QPainter(px)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            m = size * 0.12
+            rect = QRectF(m, m, size - 2 * m, size - 2 * m)
+            grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            grad.setColorAt(0.0, QColor("#feda75"))
+            grad.setColorAt(0.45, QColor("#d62976"))
+            grad.setColorAt(1.0, QColor("#962fbf"))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(grad))
+            p.drawRoundedRect(rect, size * 0.26, size * 0.26)
+            lens_r = size * 0.19
+            p.setPen(QPen(QColor("white"), size * 0.045))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(size / 2, size / 2), lens_r, lens_r)
+            dot_r = size * 0.035
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor("white")))
+            p.drawEllipse(QPointF(rect.right() - size * 0.16, rect.top() + size * 0.16), dot_r, dot_r)
+            p.end()
+            return px
+
+        def _draw_whatsapp_icon(size: int) -> QPixmap:
+            px = QPixmap(size, size)
+            px.fill(Qt.GlobalColor.transparent)
+            p = QPainter(px)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            c = size / 2
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor("#25d366")))
+            p.drawEllipse(QPointF(c, c), size * 0.44, size * 0.44)
+            bub_r = size * 0.27
+            bub_c = QPointF(c, c - size * 0.02)
+            p.setBrush(QBrush(QColor("white")))
+            p.drawEllipse(bub_c, bub_r, bub_r)
+            tail = QPainterPath()
+            tail.moveTo(c - size * 0.10, c + bub_r - size * 0.03)
+            tail.lineTo(c - size * 0.20, c + bub_r + size * 0.10)
+            tail.lineTo(c + size * 0.02, c + bub_r - size * 0.05)
+            tail.closeSubpath()
+            p.drawPath(tail)
+            p.setBrush(QBrush(QColor("#25d366")))
+            for dx in (-0.11, 0.0, 0.11):
+                p.drawEllipse(QPointF(c + dx * size, c - size * 0.02), size * 0.028, size * 0.028)
+            p.end()
+            return px
+
+        def _social_btn(pixmap: QPixmap, color: str, url: str) -> QPushButton:
+            b = QPushButton()
+            b.setIcon(QIcon(pixmap))
+            b.setIconSize(QSize(26, 26))
+            b.setFixedSize(58, 34)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(url)
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background: {C.PANEL2};
+                    border: 1px solid {C.BORDER_A}; border-radius: 6px;
+                }}
+                QPushButton:hover {{
+                    background: {C.PRI_GHO}; border: 1px solid {color};
+                }}
+            """)
+            b.clicked.connect(lambda: webbrowser.open(url))
+            return b
+
+        social_row.addWidget(_social_btn(_draw_instagram_icon(26), "#e1306c", "https://www.instagram.com"))
+        social_row.addWidget(_social_btn(_draw_whatsapp_icon(26), "#25d366", "https://web.whatsapp.com/#"))
+        lay.addLayout(social_row)
 
         return w
     def _build_right_panel(self) -> QWidget:
