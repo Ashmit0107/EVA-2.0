@@ -13,7 +13,15 @@ BASE_DIR        = _get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
-def _gemini_search(query: str) -> str:
+def _gemini_enhance(prompt: str) -> str:
+    """
+    Plain-text Gemini call — NO google_search grounding tool.
+    This draws from the normal text-generation quota, which is separate from
+    (and much larger than) the grounded-search quota that gets exhausted fast.
+    Used to synthesise/clean up DDG results into a readable answer — never as
+    the primary data source, so a quota hit here just means slightly rougher
+    formatting, not a failed search.
+    """
     from google import genai
     from core.gemini_keys import call_with_rotation
 
@@ -21,16 +29,9 @@ def _gemini_search(query: str) -> str:
         client   = genai.Client(api_key=api_key)
         response = client.models.generate_content(
             model="gemini-flash-latest",
-            contents=query,
-            config={"tools": [{"google_search": {}}]},
+            contents=prompt,
         )
-
-        text = ""
-        for part in response.candidates[0].content.parts:
-            if hasattr(part, "text") and part.text:
-                text += part.text
-
-        text = text.strip()
+        text = (getattr(response, "text", "") or "").strip()
         if not text:
             raise ValueError("Gemini returned an empty response.")
         return text
@@ -110,33 +111,46 @@ def _format_news(query: str, results: list[dict]) -> str:
     return "\n".join(lines).strip()
 
 
+def _enhance_or_raw(query: str, raw_text: str, instruction: str) -> str:
+    """
+    Tries to have Gemini rewrite/synthesise raw_text per `instruction`.
+    On ANY failure (quota, network, empty), silently returns raw_text as-is —
+    DDG's own result is always a valid answer on its own.
+    """
+    if not raw_text or raw_text.startswith("No results") or raw_text.startswith("No news"):
+        return raw_text
+    try:
+        prompt = (
+            f"{instruction}\n\n"
+            f"Query: {query}\n\n"
+            f"Raw search results:\n{raw_text}\n\n"
+            "Write a clear, well-organised answer using ONLY the facts above. "
+            "Do not invent information not present in the results."
+        )
+        return _gemini_enhance(prompt)
+    except Exception as e:
+        print(f"[WebSearch] ⚠️ Gemini enhance skipped ({e}) — using raw DDG result")
+        return raw_text
+
+
 # ── Briefing helper ────────────────────────────────────────────────────────────
 
 def _gemini_headlines(n: int = 5) -> tuple[list[str], str]:
     """
-    Fetches current headlines via Gemini grounded search.
-    Optimised for speed: minimal prompt + strict token cap.
+    Fetches current headlines. DDG news is the primary source; Gemini (plain
+    text, no grounding tool) just reformats into a clean numbered list.
     Returns (headline_list, raw_text_for_display).
     """
     import re
-    from google import genai
-    from core.gemini_keys import call_with_rotation
 
-    def _do(api_key: str) -> str:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-flash-latest",
-            contents=f"Current world news: {n} headlines. Numbered list, titles only.",
-            config={"tools": [{"google_search": {}}]},
-        )
+    results = _ddg_news("top world news today", max_results=n)
+    raw_ddg = _format_news("top world news today", results)
 
-        raw = ""
-        for part in response.candidates[0].content.parts:
-            if hasattr(part, "text") and part.text:
-                raw += part.text
-        return raw
-
-    raw = call_with_rotation(_do)
+    raw = _enhance_or_raw(
+        "top world news today",
+        raw_ddg,
+        f"Extract exactly {n} distinct headlines from these results.",
+    )
 
     headlines = []
     for line in raw.strip().split("\n"):
@@ -151,108 +165,50 @@ def _gemini_headlines(n: int = 5) -> tuple[list[str], str]:
         if clean and len(clean) > 10:
             headlines.append(clean)
 
+    if not headlines:
+        # Enhancement didn't produce a numbered list (or was skipped) —
+        # fall back to titles straight from the DDG results.
+        headlines = [r["title"] for r in results if r.get("title")][:n]
+
     return headlines[:n], raw.strip()
 
 
 # ── Modes ──────────────────────────────────────────────────────────────────────
 
 def _search(query: str) -> str:
-    """Default search — Gemini grounded, DDG fallback."""
-    try:
-        return _gemini_search(query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Gemini failed ({e}) — trying DDG...")
-        results = _ddg_search(query)
-        return _format_ddg(query, results)
+    """Default search — DDG primary, Gemini reformats when available."""
+    results = _ddg_search(query)
+    raw = _format_ddg(query, results)
+    return _enhance_or_raw(query, raw, "Answer the user's query directly and concisely.")
 
 
 def _news(query: str) -> str:
-    """
-    Runs Gemini grounded search AND DDG news in parallel.
-    Returns whichever delivers a valid result first; cancels the other.
-    """
-    import threading
-
-    gemini_query = f"latest news today: {query}" if query else "top world news today"
-    ddg_query    = query if query else "world news today"
-
-    result_box  = [None]   # first valid result lands here
-    lock        = threading.Lock()
-    done_evt    = threading.Event()
-    failures    = [0]
-
-    def _store(r: str) -> None:
-        if r and len(r) > 60:
-            with lock:
-                if result_box[0] is None:
-                    result_box[0] = r
-            done_evt.set()
-        else:
-            with lock:
-                failures[0] += 1
-                if failures[0] >= 2:   # both failed — unblock caller
-                    done_evt.set()
-
-    def _try_gemini():
-        try:
-            _store(_gemini_search(gemini_query))
-        except Exception as e:
-            print(f"[WebSearch] ⚠️ Gemini news failed ({e})")
-            _store("")
-
-    def _try_ddg():
-        try:
-            results = _ddg_news(ddg_query, max_results=8)
-            _store(_format_news(ddg_query, results))
-        except Exception as e:
-            print(f"[WebSearch] ⚠️ DDG news failed ({e})")
-            _store("")
-
-    threading.Thread(target=_try_gemini, daemon=True).start()
-    threading.Thread(target=_try_ddg,    daemon=True).start()
-
-    done_evt.wait(timeout=10.0)
-    return result_box[0] or f"No news found for: {query}"
+    """News — DDG primary, Gemini reformats when available."""
+    ddg_query = query if query else "world news today"
+    results = _ddg_news(ddg_query, max_results=8)
+    raw = _format_news(ddg_query, results)
+    return _enhance_or_raw(ddg_query, raw, "Summarise the latest news on this topic.")
 
 
 def _research(query: str) -> str:
-    """
-    Deep dive — asks Gemini for a comprehensive answer with context.
-    Falls back to a wider DDG fetch.
-    """
-    research_query = (
-        f"Comprehensive, detailed explanation of: {query}. "
-        "Include background context, key facts, current state, and important nuances."
+    """Deep dive — wider DDG fetch, Gemini synthesises when available."""
+    results = _ddg_search(query, max_results=10)
+    raw = _format_ddg(query, results)
+    return _enhance_or_raw(
+        query, raw,
+        "Give a comprehensive, detailed explanation including background context, "
+        "key facts, current state, and important nuances.",
     )
-    try:
-        return _gemini_search(research_query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Research Gemini failed ({e}) — DDG fallback...")
-        results = _ddg_search(query, max_results=10)
-        return _format_ddg(query, results)
 
 
 def _price(query: str) -> str:
-    """Product price lookup — searches for current market prices."""
-    price_query = f"current price of {query} — how much does it cost today"
-    try:
-        return _gemini_search(price_query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Price Gemini failed ({e}) — DDG fallback...")
-        results = _ddg_search(f"{query} price buy", max_results=6)
-        return _format_ddg(query, results)
+    """Product price lookup — DDG primary, Gemini reformats when available."""
+    results = _ddg_search(f"{query} price buy", max_results=6)
+    raw = _format_ddg(query, results)
+    return _enhance_or_raw(query, raw, "Extract and state the current market price clearly.")
 
 
 def _compare(items: list[str], aspect: str) -> str:
-    query = (
-        f"Compare {', '.join(items)} in terms of {aspect}. "
-        "Give specific facts and data."
-    )
-    try:
-        return _gemini_search(query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Gemini compare failed: {e} — falling back to DDG")
-
     all_results: dict[str, list] = {}
     for item in items:
         try:
@@ -268,7 +224,14 @@ def _compare(items: list[str], aspect: str) -> str:
                 lines.append(f"  • {r['snippet']}")
             if r.get("url"):
                 lines.append(f"    {r['url']}")
-    return "\n".join(lines)
+    raw = "\n".join(lines)
+
+    query = f"{', '.join(items)} — {aspect}"
+    return _enhance_or_raw(
+        query, raw,
+        f"Compare {', '.join(items)} in terms of {aspect}. Give specific facts and data, "
+        "organised per item.",
+    )
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
