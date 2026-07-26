@@ -77,8 +77,8 @@ RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    from core.gemini_keys import get_key
+    return get_key()
 
 
 def _load_system_prompt() -> str:
@@ -1501,8 +1501,9 @@ class EvaLive:
                 config = self._build_config()
 
                 # Fresh client on every reconnect — avoids stale HTTP session state
+                current_key = _get_api_key()
                 client = genai.Client(
-                    api_key=_get_api_key(),
+                    api_key=current_key,
                     http_options={"api_version": "v1beta"}
                 )
 
@@ -1568,6 +1569,19 @@ class EvaLive:
                         await asyncio.sleep(1)
                     print("[EVA] New API key saved — reconnecting...")
                     _conn_backoff = 3
+                    continue
+
+                # Quota / rate-limit hit — rotate to the next configured key
+                # instead of forcing the user through setup again.
+                from core.gemini_keys import is_quota_error, mark_exhausted, get_all_keys
+                if is_quota_error(e):
+                    mark_exhausted(current_key)
+                    n_keys = len(get_all_keys())
+                    self.ui.write_log(
+                        f"SYS: Gemini key quota hit — rotating "
+                        f"({n_keys} key{'s' if n_keys != 1 else ''} configured)."
+                    )
+                    self._conn_backoff = 2
                     continue
 
                 # Network / timeout errors — log clearly and back off

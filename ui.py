@@ -1024,7 +1024,7 @@ class _CameraPreview(QWidget):
 class SetupOverlay(QWidget):
     done = pyqtSignal(str, str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, initial_keys: list[str] | None = None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"""
@@ -1061,22 +1061,24 @@ class SetupOverlay(QWidget):
         sep.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep)
         layout.addSpacing(4)
 
-        layout.addWidget(_lbl("GEMINI API KEY", 8, color=C.TEXT_DIM,
+        layout.addWidget(_lbl("GEMINI API KEY(S)  —  up to 5, one per line", 8, color=C.TEXT_DIM,
                                align=Qt.AlignmentFlag.AlignLeft))
-        self._key_input = QLineEdit()
-        self._key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self._key_input.setPlaceholderText("AIza…")
-        self._key_input.setFont(QFont("Courier New", 10))
-        self._key_input.setFixedHeight(32)
+        self._key_input = QTextEdit()
+        self._key_input.setPlaceholderText("AIza...\nAIza...\n(up to 5 keys — rotates automatically on quota limits)")
+        self._key_input.setFont(QFont("Courier New", 9))
+        self._key_input.setFixedHeight(78)
+        self._key_input.setAcceptRichText(False)
+        if initial_keys:
+            self._key_input.setPlainText("\n".join(initial_keys))
         self._key_input.setStyleSheet(f"""
-            QLineEdit {{
+            QTextEdit {{
                 background: #000d12; color: {C.TEXT};
                 border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px;
             }}
-            QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+            QTextEdit:focus {{ border: 1px solid {C.PRI}; }}
         """)
         layout.addWidget(self._key_input)
-        layout.addSpacing(12)
+        layout.addSpacing(8)
 
         sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep2)
@@ -1140,14 +1142,15 @@ class SetupOverlay(QWidget):
                 """)
 
     def _submit(self):
-        key = self._key_input.text().strip()
-        if not key:
+        raw = self._key_input.toPlainText().strip()
+        keys = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not keys:
             self._key_input.setStyleSheet(
                 self._key_input.styleSheet() +
-                f" QLineEdit {{ border: 1px solid {C.RED}; }}"
+                f" QTextEdit {{ border: 1px solid {C.RED}; }}"
             )
             return
-        self.done.emit(key, self._sel_os)
+        self.done.emit("\n".join(keys[:5]), self._sel_os)
 
 
 class HueWheel(QWidget):
@@ -2434,7 +2437,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         cw = self.centralWidget()
         if self._overlay and self._overlay.isVisible():
-            ow, oh = 460, 390
+            ow, oh = 460, 440
             self._overlay.setGeometry(
                 (cw.width()  - ow) // 2,
                 (cw.height() - oh) // 2,
@@ -2875,6 +2878,14 @@ class MainWindow(QMainWindow):
         cust_btn.clicked.connect(self._open_customize)
         lay.addWidget(cust_btn)
 
+        keys_btn = QPushButton("🔑  MANAGE GEMINI KEYS")
+        keys_btn.setFixedHeight(26)
+        keys_btn.setFont(QFont("Courier New", 7))
+        keys_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        keys_btn.setStyleSheet(_BTN_STYLE_DIM)
+        keys_btn.clicked.connect(self._open_key_manager)
+        lay.addWidget(keys_btn)
+
         self._brief_btn = QPushButton()
         self._brief_btn.setFixedHeight(26)
         self._brief_btn.setFont(QFont("Courier New", 7))
@@ -3267,6 +3278,29 @@ class MainWindow(QMainWindow):
         if apply_ui_accent(hex_color):
             retheme_all_widgets(old, current_palette())
 
+    # ── Gemini key management ──────────────────────────────────────────────────────
+
+    def _open_key_manager(self):
+        from core.gemini_keys import get_all_keys, set_all_keys
+
+        cw  = self.centralWidget()
+        ov  = SetupOverlay(cw, initial_keys=get_all_keys())
+        ow, oh = 460, 440
+        ov.setGeometry(
+            (cw.width()  - ow) // 2,
+            (cw.height() - oh) // 2,
+            ow, oh,
+        )
+
+        def _on_keys_done(key_str: str, os_name: str):
+            keys = [k.strip() for k in key_str.split("\n") if k.strip()]
+            set_all_keys(keys)
+            self._log.append_log(f"SYS: Gemini keys updated — {len(keys)} configured.")
+            ov.hide()
+
+        ov.done.connect(_on_keys_done)
+        ov.show()
+
     def _apply_name_update(self, name: str, user_name: str, ui_color: str = ""):
         """Update all name/theme-dependent UI elements and persist to config."""
         self._assistant_name = name.strip() or "EVA"
@@ -3379,15 +3413,16 @@ class MainWindow(QMainWindow):
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
         try:
+            from core.gemini_keys import get_all_keys
             d = json.loads(API_FILE.read_text(encoding="utf-8"))
-            return bool(d.get("gemini_api_key")) and bool(d.get("os_system"))
+            return bool(get_all_keys()) and bool(d.get("os_system"))
         except Exception:
             return False
 
     def _show_setup(self):
         ov = SetupOverlay(self.centralWidget())
         cw = self.centralWidget()
-        ow, oh = 460, 390
+        ow, oh = 460, 440
         ov.setGeometry(
             (cw.width()  - ow) // 2,
             (cw.height() - oh) // 2,
@@ -3398,11 +3433,13 @@ class MainWindow(QMainWindow):
         self._overlay = ov
 
     def _on_setup_done(self, key: str, os_name: str):
+        from core.gemini_keys import set_all_keys
         os.makedirs(CONFIG_DIR, exist_ok=True)
-        API_FILE.write_text(
-            json.dumps({"gemini_api_key": key, "os_system": os_name}, indent=4),
-            encoding="utf-8",
-        )
+        keys = [k.strip() for k in key.split("\n") if k.strip()]
+        set_all_keys(keys)   # writes gemini_api_keys[] + legacy gemini_api_key
+        data = _read_full_config()
+        data["os_system"] = os_name
+        API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
         self._ready = True
         if self._overlay:
             self._overlay.hide()

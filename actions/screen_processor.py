@@ -63,10 +63,11 @@ def _save_config_key(key: str, value) -> None:
 
 
 def _get_api_key() -> str:
-    key = _load_config().get("gemini_api_key", "")
-    if not key:
-        raise RuntimeError("gemini_api_key not found in config.")
-    return key
+    from core.gemini_keys import get_key
+    try:
+        return get_key()
+    except Exception as e:
+        raise RuntimeError(f"gemini_api_key not found in config: {e}")
 
 
 def _get_os() -> str:
@@ -254,10 +255,6 @@ class _VisionSession:
         self._out_queue = asyncio.Queue(maxsize=30)
         self._audio_in  = asyncio.Queue()
 
-        client = genai.Client(
-            api_key=_get_api_key(),
-            http_options={"api_version": "v1beta"},
-        )
         config = gtypes.LiveConnectConfig(
             response_modalities=["AUDIO"],
             output_audio_transcription={},
@@ -274,6 +271,11 @@ class _VisionSession:
         backoff = 2.0
         while True:
             try:
+                current_key = _get_api_key()
+                client = genai.Client(
+                    api_key=current_key,
+                    http_options={"api_version": "v1beta"},
+                )
                 print("[Vision] 🔌 Connecting...")
                 async with client.aio.live.connect(
                     model=_LIVE_MODEL, config=config
@@ -289,8 +291,11 @@ class _VisionSession:
                         tg.create_task(self._play_loop())
 
             except* Exception as eg:
+                from core.gemini_keys import is_quota_error, mark_exhausted
                 for exc in eg.exceptions:
                     print(f"[Vision] ⚠️  Session error: {exc}")
+                    if is_quota_error(exc):
+                        mark_exhausted(current_key)
             finally:
                 self._session = None
                 self._ready_evt.clear()

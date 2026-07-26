@@ -13,30 +13,29 @@ BASE_DIR        = _get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
-
 def _gemini_search(query: str) -> str:
     from google import genai
+    from core.gemini_keys import call_with_rotation
 
-    client   = genai.Client(api_key=_get_api_key())
-    response = client.models.generate_content(
-        model="gemini-flash-latest",
-        contents=query,
-        config={"tools": [{"google_search": {}}]},
-    )
+    def _do(api_key: str) -> str:
+        client   = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=query,
+            config={"tools": [{"google_search": {}}]},
+        )
 
-    text = ""
-    for part in response.candidates[0].content.parts:
-        if hasattr(part, "text") and part.text:
-            text += part.text
+        text = ""
+        for part in response.candidates[0].content.parts:
+            if hasattr(part, "text") and part.text:
+                text += part.text
 
-    text = text.strip()
-    if not text:
-        raise ValueError("Gemini returned an empty response.")
-    return text
+        text = text.strip()
+        if not text:
+            raise ValueError("Gemini returned an empty response.")
+        return text
+
+    return call_with_rotation(_do)
 
 
 def _ddg_search(query: str, max_results: int = 6) -> list[dict]:
@@ -121,18 +120,23 @@ def _gemini_headlines(n: int = 5) -> tuple[list[str], str]:
     """
     import re
     from google import genai
+    from core.gemini_keys import call_with_rotation
 
-    client = genai.Client(api_key=_get_api_key())
-    response = client.models.generate_content(
-        model="gemini-flash-latest",
-        contents=f"Current world news: {n} headlines. Numbered list, titles only.",
-        config={"tools": [{"google_search": {}}]},
-    )
+    def _do(api_key: str) -> str:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=f"Current world news: {n} headlines. Numbered list, titles only.",
+            config={"tools": [{"google_search": {}}]},
+        )
 
-    raw = ""
-    for part in response.candidates[0].content.parts:
-        if hasattr(part, "text") and part.text:
-            raw += part.text
+        raw = ""
+        for part in response.candidates[0].content.parts:
+            if hasattr(part, "text") and part.text:
+                raw += part.text
+        return raw
+
+    raw = call_with_rotation(_do)
 
     headlines = []
     for line in raw.strip().split("\n"):
