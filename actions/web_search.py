@@ -31,12 +31,43 @@ def _gemini_enhance(prompt: str) -> str:
             model="gemini-flash-latest",
             contents=prompt,
         )
-        text = (getattr(response, "text", "") or "").strip()
+        text = ""
+        try:
+            for part in response.candidates[0].content.parts:
+                if getattr(part, "text", None) and not getattr(part, "thought", False):
+                    text += part.text
+        except Exception:
+            text = (getattr(response, "text", "") or "")
+        text = text.strip()
         if not text:
             raise ValueError("Gemini returned an empty response.")
         return text
 
     return call_with_rotation(_do)
+
+
+def _with_retry(fn, retries: int = 3, base_delay: float = 5.0):
+    """
+    Runs fn() with retry/backoff on DDG rate-limit (403) errors.
+    Re-raises the last exception if all retries are exhausted.
+    """
+    import time
+
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            msg = str(e)
+            if "Ratelimit" in msg or "403" in msg or "429" in msg:
+                if attempt < retries - 1:
+                    delay = base_delay * (attempt + 1)
+                    print(f"[WebSearch] ⏳ Rate-limited, retrying in {delay:.0f}s (attempt {attempt + 1}/{retries})")
+                    time.sleep(delay)
+                    continue
+            raise
+    raise last_exc
 
 
 def _ddg_search(query: str, max_results: int = 6) -> list[dict]:
@@ -45,15 +76,18 @@ def _ddg_search(query: str, max_results: int = 6) -> list[dict]:
     except ImportError:
         from duckduckgo_search import DDGS
 
-    results = []
-    with DDGS() as ddgs:
-        for r in ddgs.text(query, max_results=max_results):
-            results.append({
-                "title":   r.get("title",  ""),
-                "snippet": r.get("body",   ""),
-                "url":     r.get("href",   ""),
-            })
-    return results
+    def _do():
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=max_results):
+                results.append({
+                    "title":   r.get("title",  ""),
+                    "snippet": r.get("body",   ""),
+                    "url":     r.get("href",   ""),
+                })
+        return results
+
+    return _with_retry(_do)
 
 
 def _ddg_news(query: str, max_results: int = 8) -> list[dict]:
@@ -63,8 +97,8 @@ def _ddg_news(query: str, max_results: int = 8) -> list[dict]:
     except ImportError:
         from duckduckgo_search import DDGS
 
-    results = []
-    try:
+    def _do():
+        results = []
         with DDGS() as ddgs:
             for r in ddgs.news(query, max_results=max_results):
                 results.append({
@@ -73,10 +107,13 @@ def _ddg_news(query: str, max_results: int = 8) -> list[dict]:
                     "url":     r.get("url",    ""),
                     "source":  r.get("source", ""),
                 })
+        return results
+
+    try:
+        return _with_retry(_do)
     except Exception as e:
-        print(f"[WebSearch] ⚠️ DDG news() failed ({e}) — falling back to text search")
-        results = _ddg_search(query, max_results=max_results)
-    return results
+        print(f"[WebSearch] ⚠️ DDG news() failed after retries ({e}) — falling back to text search")
+        return _ddg_search(query, max_results=max_results)
 
 
 def _format_ddg(query: str, results: list[dict]) -> str:
