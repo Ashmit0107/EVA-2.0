@@ -1,0 +1,546 @@
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+_CNW: dict = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW}
+    if platform.system() == "Windows" else {}
+)
+
+_APP_LABEL = "EVA"   # notification title / branding — kept in one place for future rebrands
+
+
+def _base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _get_os() -> str:
+    _sys = platform.system()
+    if _sys == "Darwin":
+        return "mac"
+    if _sys == "Linux":
+        return "linux"
+    return "windows"
+
+
+def _scripts_dir() -> Path:
+    d = Path.home() / ".eva" / "reminders"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _index_path() -> Path:
+    return _scripts_dir() / "index.json"
+
+
+def _load_index() -> list:
+    p = _index_path()
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _save_index(items: list) -> None:
+    try:
+        _index_path().write_text(json.dumps(items, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[Reminder] ⚠️ Could not save index: {e}")
+
+
+def _add_to_index(entry: dict) -> None:
+    items = _load_index()
+    items.append(entry)
+    _save_index(items)
+
+
+def _remove_from_index(reminder_id: str) -> dict | None:
+    items = _load_index()
+    match = next((it for it in items if it.get("id") == reminder_id), None)
+    if match:
+        items = [it for it in items if it.get("id") != reminder_id]
+        _save_index(items)
+    return match
+
+
+def _find_in_index(identifier: str) -> dict | None:
+    """Match by exact id, or (case-insensitive) substring of the message."""
+    items = _load_index()
+    for it in items:
+        if it.get("id") == identifier:
+            return it
+    ident_lc = identifier.lower().strip()
+    for it in items:
+        if ident_lc in (it.get("message", "").lower()):
+            return it
+    return None
+
+
+def _sanitise(text: str, max_len: int = 200) -> str:
+    return (
+        text.replace("\\", "")
+            .replace('"', "")
+            .replace("'", "")
+            .replace("\n", " ")
+            .replace("\r", "")
+            .strip()
+    )[:max_len]
+
+
+def _write_notify_script(task_name: str, message: str, os_name: str, recurrence: str) -> Path:
+    """Generates the notification script. One-shot reminders self-delete after firing;
+    recurring reminders (daily/weekly) persist since the scheduler re-triggers them."""
+    script_path = _scripts_dir() / f"{task_name}.py"
+    msg_literal = json.dumps(message)
+    title_literal = json.dumps(f"{_APP_LABEL} Reminder")
+
+    if os_name == "windows":
+        notify_block = f"""
+title   = {title_literal}
+message = {msg_literal}
+notified = False
+
+try:
+    from plyer import notification
+    notification.notify(title=title, message=message, timeout=15)
+    notified = True
+except Exception:
+    pass
+
+if not notified:
+    try:
+        from win10toast import ToastNotifier
+        ToastNotifier().show_toast(title, message, duration=15, threaded=False)
+        notified = True
+    except Exception:
+        pass
+
+if not notified:
+    try:
+        import subprocess
+        subprocess.run(["msg", "*", "/TIME:30", message], check=False)
+    except Exception:
+        pass
+
+try:
+    import winsound
+    for freq in [800, 1000, 1200]:
+        winsound.Beep(freq, 180)
+        import time; time.sleep(0.08)
+except Exception:
+    pass
+"""
+
+    elif os_name == "mac":
+        notify_block = f"""
+title   = {title_literal}
+message = {msg_literal}
+notified = False
+
+try:
+    from plyer import notification
+    notification.notify(title=title, message=message, timeout=15)
+    notified = True
+except Exception:
+    pass
+
+if not notified:
+    try:
+        import subprocess
+        script = 'display notification "{{}}" with title "{{}}"'.format(
+            message.replace('"', ''), title.replace('"', '')
+        )
+        subprocess.run(["osascript", "-e", script], check=False)
+    except Exception:
+        pass
+"""
+
+    else:  # linux
+        notify_block = f"""
+title   = {title_literal}
+message = {msg_literal}
+notified = False
+
+try:
+    from plyer import notification
+    notification.notify(title=title, message=message, timeout=15)
+    notified = True
+except Exception:
+    pass
+
+if not notified:
+    try:
+        import subprocess
+        subprocess.run(
+            ["notify-send", "--urgency=normal", "--expire-time=15000", title, message],
+            check=False
+        )
+    except Exception:
+        pass
+"""
+
+    self_delete = "" if recurrence else """
+# Self-delete after firing (one-shot reminder only)
+try:
+    pathlib.Path(__file__).unlink(missing_ok=True)
+except Exception:
+    pass
+"""
+
+    script_body = f"""# Auto-generated by {_APP_LABEL} reminder — do not edit
+import sys, os, pathlib
+{notify_block}
+{self_delete}
+"""
+    script_path.write_text(script_body, encoding="utf-8")
+    script_path.chmod(0o600)   # owner read/write only
+    return script_path
+
+
+def _schedule_windows(target_dt: datetime, task_name: str,
+                      script_path: Path, message: str, recurrence: str) -> str:
+    python_exe = Path(sys.executable)
+    pythonw = python_exe.parent / "pythonw.exe"
+    if pythonw.exists():
+        python_exe = pythonw
+
+    if recurrence == "daily":
+        trigger_xml = (
+            '<CalendarTrigger>\n'
+            f'    <StartBoundary>{target_dt.strftime("%Y-%m-%dT%H:%M:%S")}</StartBoundary>\n'
+            '    <Enabled>true</Enabled>\n'
+            '    <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>\n'
+            '  </CalendarTrigger>'
+        )
+    elif recurrence == "weekly":
+        # DaysOfWeek flag matching target_dt's weekday
+        _dow_names = ["Monday", "Tuesday", "Wednesday", "Thursday",
+                      "Friday", "Saturday", "Sunday"]
+        dow_tag = _dow_names[target_dt.weekday()]
+        trigger_xml = (
+            '<CalendarTrigger>\n'
+            f'    <StartBoundary>{target_dt.strftime("%Y-%m-%dT%H:%M:%S")}</StartBoundary>\n'
+            '    <Enabled>true</Enabled>\n'
+            f'    <ScheduleByWeek><DaysOfWeek><{dow_tag} /></DaysOfWeek>'
+            '<WeeksInterval>1</WeeksInterval></ScheduleByWeek>\n'
+            '  </CalendarTrigger>'
+        )
+    else:
+        trigger_xml = (
+            '<TimeTrigger>\n'
+            f'    <StartBoundary>{target_dt.strftime("%Y-%m-%dT%H:%M:%S")}</StartBoundary>\n'
+            '    <Enabled>true</Enabled>\n'
+            '  </TimeTrigger>'
+        )
+
+    xml_path = _scripts_dir() / f"{task_name}.xml"
+    xml_content = (
+        '<?xml version="1.0" encoding="UTF-16"?>\n'
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+        f'  <RegistrationInfo><Description>{_APP_LABEL} Reminder</Description></RegistrationInfo>\n'
+        f'  <Triggers>{trigger_xml}</Triggers>\n'
+        '  <Actions><Exec>\n'
+        f'    <Command>{python_exe}</Command>\n'
+        f'    <Arguments>"{script_path}"</Arguments>\n'
+        '  </Exec></Actions>\n'
+        '  <Settings>\n'
+        '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n'
+        '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n'
+        '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n'
+        '    <StartWhenAvailable>true</StartWhenAvailable>\n'
+        '    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>\n'
+        '    <Enabled>true</Enabled>\n'
+        '  </Settings>\n'
+        '  <Principals><Principal>\n'
+        '    <LogonType>InteractiveToken</LogonType>\n'
+        '    <RunLevel>LeastPrivilege</RunLevel>\n'
+        '  </Principal></Principals>\n'
+        '</Task>'
+    )
+
+    xml_path.write_text(xml_content, encoding="utf-16")
+
+    result = subprocess.run(
+        ["schtasks", "/Create", "/TN", task_name, "/XML", str(xml_path), "/F"],
+        capture_output=True, text=True, **_CNW,
+    )
+
+    try:
+        xml_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    if result.returncode != 0:
+        script_path.unlink(missing_ok=True)
+        err = (result.stderr or result.stdout).strip()
+        print(f"[Reminder] ❌ schtasks: {err}")
+        return ""
+
+    return task_name
+
+
+def _schedule_mac(target_dt: datetime, task_name: str,
+                  script_path: Path, recurrence: str) -> str:
+    agents_dir = Path.home() / "Library" / "LaunchAgents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+
+    label      = f"com.eva.reminder.{task_name}"
+    plist_path = agents_dir / f"{label}.plist"
+
+    if recurrence == "weekly":
+        interval_xml = (
+            '<dict>\n'
+            f'    <key>Weekday</key> <integer>{(target_dt.weekday() + 1) % 7}</integer>\n'
+            f'    <key>Hour</key>    <integer>{target_dt.hour}</integer>\n'
+            f'    <key>Minute</key>  <integer>{target_dt.minute}</integer>\n'
+            '  </dict>'
+        )
+    elif recurrence == "daily":
+        interval_xml = (
+            '<dict>\n'
+            f'    <key>Hour</key>   <integer>{target_dt.hour}</integer>\n'
+            f'    <key>Minute</key> <integer>{target_dt.minute}</integer>\n'
+            '  </dict>'
+        )
+    else:
+        interval_xml = (
+            '<dict>\n'
+            f'    <key>Year</key>   <integer>{target_dt.year}</integer>\n'
+            f'    <key>Month</key>  <integer>{target_dt.month}</integer>\n'
+            f'    <key>Day</key>    <integer>{target_dt.day}</integer>\n'
+            f'    <key>Hour</key>   <integer>{target_dt.hour}</integer>\n'
+            f'    <key>Minute</key> <integer>{target_dt.minute}</integer>\n'
+            '  </dict>'
+        )
+
+    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>             <string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{sys.executable}</string>
+    <string>{script_path}</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  {interval_xml}
+  <key>RunAtLoad</key>         <false/>
+  <key>StandardOutPath</key>   <string>/dev/null</string>
+  <key>StandardErrorPath</key> <string>/dev/null</string>
+</dict>
+</plist>
+"""
+    plist_path.write_text(plist_content, encoding="utf-8")
+    plist_path.chmod(0o644)
+
+    result = subprocess.run(
+        ["launchctl", "load", str(plist_path)],
+        capture_output=True, text=True,
+    )
+
+    if result.returncode != 0:
+        plist_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+        print(f"[Reminder] ❌ launchctl: {result.stderr.strip()}")
+        return ""
+
+    return label
+
+
+def _schedule_linux(target_dt: datetime, task_name: str,
+                    script_path: Path, recurrence: str) -> str:
+
+    if recurrence in ("daily", "weekly") and shutil.which("systemd-run"):
+        if recurrence == "daily":
+            on_calendar = f"*-*-* {target_dt.strftime('%H:%M')}:00"
+        else:
+            _dow = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][target_dt.weekday()]
+            on_calendar = f"{_dow} *-*-* {target_dt.strftime('%H:%M')}:00"
+        result = subprocess.run(
+            [
+                "systemd-run", "--user",
+                f"--on-calendar={on_calendar}",
+                f"--unit={task_name}",
+                "--",
+                sys.executable, str(script_path),
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return task_name
+        print(f"[Reminder] ⚠️ systemd-run recurring failed: {result.stderr.strip()}")
+        return ""
+
+    if shutil.which("systemd-run"):
+        on_calendar = target_dt.strftime("%Y-%m-%d %H:%M:00")
+        result = subprocess.run(
+            [
+                "systemd-run", "--user",
+                f"--on-calendar={on_calendar}",
+                f"--unit={task_name}",
+                "--",
+                sys.executable, str(script_path),
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return task_name
+        print(f"[Reminder] ⚠️ systemd-run failed: {result.stderr.strip()}, trying 'at'")
+
+    if shutil.which("at"):
+        at_time = target_dt.strftime("%H:%M %Y-%m-%d")
+        cmd_str = f"{sys.executable} {script_path}\n"
+        result  = subprocess.run(
+            ["at", at_time],
+            input=cmd_str, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return task_name
+        print(f"[Reminder] ❌ at: {result.stderr.strip()}")
+        return ""
+
+    print("[Reminder] ❌ Neither systemd-run nor at found on this Linux system.")
+    return ""
+
+
+def _unschedule(job_id: str, os_name: str) -> None:
+    """Best-effort removal of the underlying OS scheduler job."""
+    try:
+        if os_name == "windows":
+            subprocess.run(["schtasks", "/Delete", "/TN", job_id, "/F"],
+                            capture_output=True, text=True, **_CNW)
+        elif os_name == "mac":
+            plist_path = (Path.home() / "Library" / "LaunchAgents" / f"{job_id}.plist")
+            subprocess.run(["launchctl", "unload", str(plist_path)],
+                            capture_output=True, text=True)
+            plist_path.unlink(missing_ok=True)
+        else:
+            if shutil.which("systemctl"):
+                subprocess.run(["systemctl", "--user", "stop", f"{job_id}.timer"],
+                                capture_output=True, text=True)
+                subprocess.run(["systemctl", "--user", "disable", f"{job_id}.timer"],
+                                capture_output=True, text=True)
+    except Exception as e:
+        print(f"[Reminder] ⚠️ Unschedule warning: {e}")
+
+
+def reminder(
+    parameters: dict,
+    response=None,
+    player=None,
+    session_memory=None,
+) -> str:
+
+    date_str   = parameters.get("date", "").strip()
+    time_str   = parameters.get("time", "").strip()
+    message    = parameters.get("message", "Reminder").strip()
+    recurrence = (parameters.get("recurrence") or "").strip().lower()
+    if recurrence not in ("", "daily", "weekly"):
+        recurrence = ""
+
+    if not date_str or not time_str:
+        return "I need both a date and a time to set a reminder."
+
+    try:
+        target_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return "I couldn't parse that date or time. Please use YYYY-MM-DD and HH:MM."
+
+    if target_dt <= datetime.now() and not recurrence:
+        return "That time has already passed — I can't set a one-time reminder in the past."
+
+    os_name    = _get_os()
+    safe_msg   = _sanitise(message)
+    reminder_id = uuid.uuid4().hex[:10]
+    task_name  = f"EVAReminder_{target_dt.strftime('%Y%m%d_%H%M%S')}_{reminder_id}"
+
+    try:
+        script_path = _write_notify_script(task_name, safe_msg, os_name, recurrence)
+    except Exception as e:
+        return f"Could not prepare the reminder script: {e}"
+
+    try:
+        if os_name == "windows":
+            job_id = _schedule_windows(target_dt, task_name, script_path, safe_msg, recurrence)
+        elif os_name == "mac":
+            job_id = _schedule_mac(target_dt, task_name, script_path, recurrence)
+        else:
+            job_id = _schedule_linux(target_dt, task_name, script_path, recurrence)
+    except Exception as e:
+        script_path.unlink(missing_ok=True)
+        print(f"[Reminder] ❌ Scheduling exception: {e}")
+        return "Something went wrong while scheduling the reminder."
+
+    if not job_id:
+        return "I couldn't register the reminder with the system scheduler."
+
+    _add_to_index({
+        "id": reminder_id,
+        "job_id": job_id,
+        "task_name": task_name,
+        "message": safe_msg,
+        "date": date_str,
+        "time": time_str,
+        "recurrence": recurrence,
+        "os": os_name,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    })
+
+    if player:
+        cad = f" ({recurrence})" if recurrence else ""
+        player.write_log(f"[Reminder] ✅ {date_str} {time_str}{cad} — {safe_msg[:40]}")
+
+    friendly_time = target_dt.strftime("%B %d at %I:%M %p")
+    if recurrence == "daily":
+        return f"Recurring daily reminder set for {target_dt.strftime('%I:%M %p')}, starting {friendly_time}."
+    if recurrence == "weekly":
+        return f"Recurring weekly reminder set for every {target_dt.strftime('%A')} at {target_dt.strftime('%I:%M %p')}, starting {friendly_time}."
+    return f"Reminder set for {friendly_time}."
+
+
+def list_reminders(parameters: dict | None = None, player=None) -> str:
+    items = _load_index()
+    if not items:
+        return "You have no scheduled reminders."
+    items.sort(key=lambda it: (it.get("date", ""), it.get("time", "")))
+    lines = []
+    for it in items:
+        cad = f" [{it['recurrence']}]" if it.get("recurrence") else ""
+        lines.append(f"- {it['date']} {it['time']}{cad} — {it['message']}  (id: {it['id']})")
+    return "Scheduled reminders:\n" + "\n".join(lines)
+
+
+def cancel_reminder(parameters: dict, player=None) -> str:
+    identifier = (parameters.get("reminder_id") or parameters.get("query") or "").strip()
+    if not identifier:
+        return "Tell me which reminder to cancel — the id or part of its message."
+
+    match = _find_in_index(identifier)
+    if not match:
+        return f"I couldn't find a scheduled reminder matching '{identifier}'."
+
+    _unschedule(match["job_id"], match.get("os", _get_os()))
+    _remove_from_index(match["id"])
+
+    # Clean up leftover generated script if still present (one-shot jobs self-delete on fire)
+    try:
+        (_scripts_dir() / f"{match['task_name']}.py").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    if player:
+        player.write_log(f"[Reminder] 🗑️ Cancelled — {match['message'][:40]}")
+
+    return f"Cancelled the reminder: {match['message']}."
