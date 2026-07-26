@@ -80,42 +80,6 @@ News queries now run Gemini Grounded Search and DuckDuckGo news simultaneously i
 
 ---
 
-## 🗺️ Mark Roadmap
-
-| Mark | Focus |
-|---|---|
-| **XLVIII** | Instant interrupt · parallel news · two-phase briefing · exponential backoff · vision cooldown |
-| **XLIX** | Auto-start · clipboard intelligence · assistant customization |
-| **L** | Session memory · background monitoring · proactive 2.0 · instant vision · parallel news search |
-| **EVA** | Renamed to EVA · recurring reminders + list/cancel jobs · to-do/agenda list · quick notes |
-| **LI+** | Plugin system · email · quiz mode · calorie counter · calendar |
-
----
-
-## ⚡ Quick Start
-
-```bash
-git clone https://github.com/FatihMakes/Mark-L.git
-cd Mark-L
-pip install -r requirements.txt
-python main.py
-```
-
-> ⚠️ **Installation Note:** Some OS-specific dependencies are not bundled in `requirements.txt` to keep the repo lightweight. If you hit a `ModuleNotFoundError`, install the missing package with `pip install <module_name>`.
-
----
-
-## 📋 Requirements
-
-| Requirement | Details |
-| --- | --- |
-| **OS** | Windows 10/11, macOS, or Linux |
-| **Python** | 3.11 or 3.12 |
-| **Microphone** | Required for voice interaction |
-| **API Key** | Free Gemini API key (`config/api_keys.json`) |
-
----
-
 ## 🗂️ Project Structure
 
 ```
