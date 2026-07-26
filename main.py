@@ -39,7 +39,7 @@ from actions.flight_finder     import flight_finder
 from actions.open_app          import open_app
 from actions.weather_report    import weather_action
 from actions.send_message      import send_message
-from actions.reminder          import reminder
+from actions.reminder          import reminder, list_reminders as list_reminders_action, cancel_reminder as cancel_reminder_action
 from actions.computer_settings import computer_settings
 from actions.screen_processor  import _capture_camera, _capture_screen
 from actions.youtube_video     import youtube_video
@@ -174,15 +174,36 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "reminder",
-        "description": "Sets a timed reminder using Task Scheduler.",
+        "description": (
+            "Sets a timed reminder/job using the OS scheduler. Supports one-off and "
+            "recurring (daily/weekly) reminders."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "date":    {"type": "STRING", "description": "Date in YYYY-MM-DD format"},
-                "time":    {"type": "STRING", "description": "Time in HH:MM format (24h)"},
-                "message": {"type": "STRING", "description": "Reminder message text"}
+                "date":       {"type": "STRING", "description": "Date in YYYY-MM-DD format (first/next occurrence)"},
+                "time":       {"type": "STRING", "description": "Time in HH:MM format (24h)"},
+                "message":    {"type": "STRING", "description": "Reminder message text"},
+                "recurrence": {"type": "STRING", "description": "'' (one-time, default) | 'daily' | 'weekly'"}
             },
             "required": ["date", "time", "message"]
+        }
+    },
+    {
+        "name": "list_reminders",
+        "description": "Lists all currently scheduled reminders/jobs (one-off and recurring).",
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []}
+    },
+    {
+        "name": "cancel_reminder",
+        "description": "Cancels a previously scheduled reminder by id or by a snippet of its message text.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "reminder_id": {"type": "STRING", "description": "Exact reminder id, if known"},
+                "query":       {"type": "STRING", "description": "Snippet of the reminder message to match, if id is unknown"}
+            },
+            "required": []
         }
     },
     {
@@ -751,6 +772,14 @@ class JarvisLive:
             elif name == "reminder":
                 r = await loop.run_in_executor(None, lambda: reminder(parameters=args, response=None, player=self.ui))
                 result = r or "Reminder set."
+
+            elif name == "list_reminders":
+                r = await loop.run_in_executor(None, lambda: list_reminders_action(parameters=args, player=self.ui))
+                result = r or "No reminders found."
+
+            elif name == "cancel_reminder":
+                r = await loop.run_in_executor(None, lambda: cancel_reminder_action(parameters=args, player=self.ui))
+                result = r or "Could not cancel that reminder."
 
             elif name == "youtube_video":
                 r = await loop.run_in_executor(None, lambda: youtube_video(parameters=args, response=None, player=self.ui))
