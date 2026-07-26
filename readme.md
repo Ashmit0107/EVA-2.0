@@ -5,7 +5,7 @@ A real-time voice AI that can hear, see, understand, and control your computer �
 
 ## ✨ Overview
 
-MARK L is where the assistant stops being a tool and starts being a presence. It remembers yesterday's conversation, watches the topics you care about, and speaks first when it has something worth saying. The goal of this build was continuity — JARVIS should feel like it never fully left, even after you close it.
+MARK L is where the assistant stops being a tool and starts being a presence. It remembers yesterday's conversation, watches the topics you care about, and speaks first when it has something worth saying. The goal of this build was continuity — EVA should feel like it never fully left, even after you close it.
 
 It's not just an assistant — it's an extension of your digital life.
 
@@ -30,7 +30,9 @@ It's not just an assistant — it's an extension of your digital life.
 | 🌤️ Weather Report | Live weather data for your city, personalized from memory |
 | 🗺️ Dynamic Content Panel | Scrollable display layer beneath the HUD that renders web results, news, and search data |
 | 🔍 Multi-Mode Web Search | `news` / `research` / `price` / `compare` / `search` — Gemini Grounded first, DDG fallback |
-| ⏰ Smart Reminders | OS-native scheduled notifications (Windows Task Scheduler / macOS LaunchAgent / Linux systemd) |
+| ⏰ Smart Reminders & Scheduling | OS-native one-off AND recurring (daily/weekly) reminders — schedule, list, and cancel by voice |
+| ✅ Task List & Agenda | Add, list, complete, and delete to-dos by voice — mentioned automatically in the morning briefing |
+| 📝 Quick Notes | Jot down and later search short free-form notes hands-free |
 | ✈️ Flight Finder | Live flight price and availability lookup |
 | 🎮 Game Updater | Checks and triggers game updates on Steam and Epic Games on demand |
 | 📂 File Processor | Read, summarize, and answer questions about local files |
@@ -49,20 +51,20 @@ It's not just an assistant — it's an extension of your digital life.
 
 ## 🆕 What's New in Mark L
 
-### 🗓️ Session Memory — JARVIS Remembers Yesterday
-At the end of every session, JARVIS generates a 1-2 sentence summary of what was discussed and saves it to memory. The next morning, it's mentioned naturally in the briefing:
+### 🗓️ Session Memory — EVA Remembers Yesterday
+At the end of every session, EVA generates a 1-2 sentence summary of what was discussed and saves it to memory. The next morning, it's mentioned naturally in the briefing:
 > *"Good morning, sir — it's 09:15. Yesterday you were working on the Mark L background monitoring feature. Fetching today's headlines now."*
 
 The summary is consumed immediately after use — it never repeats in future briefings and adds zero long-term bloat to memory.
 
-### 👁️‍🗨️ Background Monitoring — JARVIS Watches While You're Away
-Tell JARVIS to monitor any topic and it checks for new developments once a day using DuckDuckGo news. When a headline changes, it reports back naturally in your language:
+### 👁️‍🗨️ Background Monitoring — EVA Watches While You're Away
+Tell EVA to monitor any topic and it checks for new developments once a day using DuckDuckGo news. When a headline changes, it reports back naturally in your language:
 > *"Efendim, takip ettiğiniz yapay zeka haberlerinde bir gelişme var: Google yeni bir model duyurdu."*
 
-Fully opt-in — JARVIS monitors nothing without being explicitly asked. Crypto, financial, and trading topics are blocked at the code level regardless of what is requested. Same headline never triggers twice.
+Fully opt-in — EVA monitors nothing without being explicitly asked. Crypto, financial, and trading topics are blocked at the code level regardless of what is requested. Same headline never triggers twice.
 
 ### 🔔 Proactive System 2.0 — Context-Aware, Time-Aware, Non-Repetitive
-The proactive engine was rebuilt from the ground up. Instead of a generic check-in after 15 minutes of silence, JARVIS now:
+The proactive engine was rebuilt from the ground up. Instead of a generic check-in after 15 minutes of silence, EVA now:
 - Knows the **time of day** — morning tone differs from evening tone
 - Knows your **active projects** from memory and can ask how something is going
 - Knows your **monitored topics** and can bring one up naturally
@@ -71,7 +73,7 @@ The proactive engine was rebuilt from the ground up. Instead of a generic check-
 - Has a 20-minute cooldown (up from 10) — less intrusive, more meaningful
 
 ### 👁️ Instant Vision Acknowledgment — No More Silent Waiting
-When you ask JARVIS to look at your screen or camera, it no longer goes silent while processing. It immediately says something natural ("Looking at your screen now, sir" / "Ekrana bakıyorum efendim") while the capture runs. The actual analysis follows as the next response.
+When you ask EVA to look at your screen or camera, it no longer goes silent while processing. It immediately says something natural ("Looking at your screen now, sir" / "Ekrana bakıyorum efendim") while the capture runs. The actual analysis follows as the next response.
 
 ### 📰 Parallel News Search — First Result Wins
 News queries now run Gemini Grounded Search and DuckDuckGo news simultaneously in two threads. Whichever delivers a valid result first is used; the other is silently discarded. A Gemini 503 error no longer delays results — the DDG fallback is already running in parallel.
@@ -85,6 +87,7 @@ News queries now run Gemini Grounded Search and DuckDuckGo news simultaneously i
 | **XLVIII** | Instant interrupt · parallel news · two-phase briefing · exponential backoff · vision cooldown |
 | **XLIX** | Auto-start · clipboard intelligence · assistant customization |
 | **L** | Session memory · background monitoring · proactive 2.0 · instant vision · parallel news search |
+| **EVA** | Renamed to EVA · recurring reminders + list/cancel jobs · to-do/agenda list · quick notes |
 | **LI+** | Plugin system · email · quiz mode · calorie counter · calendar |
 
 ---
@@ -116,7 +119,7 @@ python main.py
 ## 🗂️ Project Structure
 
 ```
-Mark L/
+Mark L/  (EVA)
 ├── main.py                   # Core loop — Gemini Live session, audio I/O, tool dispatch
 ├── ui.py                     # PyQt6 HUD — waveform, log panel, interrupt button, camera feed
 ├── setup.py                  # First-run configuration wizard
@@ -125,7 +128,8 @@ Mark L/
 │   ├── screen_processor.py   # Screen capture & webcam vision via Gemini Live
 │   ├── background_monitor.py # User-configured topic watching — daily DDG check, no crypto
 │   ├── proactive.py          # Proactive 2.0 — time/context/rotation-aware check-ins
-│   ├── reminder.py           # OS-native scheduled notifications
+│   ├── reminder.py           # OS-native one-off + recurring reminders, list/cancel scheduled jobs
+│   ├── tasks.py              # To-do/agenda list + quick notes (local JSON store)
 │   ├── system_monitor.py     # CPU / RAM / GPU / temperature telemetry
 │   ├── computer_settings.py  # Volume, brightness, WiFi, power
 │   ├── computer_control.py   # Keyboard shortcuts, mouse, window management

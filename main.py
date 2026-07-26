@@ -52,6 +52,7 @@ from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.system_monitor    import SystemMonitor, get_system_status
+from actions.tasks             import manage_task, quick_note, pending_task_count
 from actions.proactive         import ProactiveEngine
 from actions.background_monitor import (
     add_monitor, remove_monitor, list_monitors, check_all as monitor_check_all,
@@ -456,6 +457,42 @@ TOOL_DECLARATIONS = [
             },
             "required": ["action"],
         },
+    },
+    {
+        "name": "manage_task",
+        "description": (
+            "Manages a running to-do/agenda list. Use add_task when the user asks to add "
+            "something to their list/agenda/to-dos, list_tasks when they ask what's on their "
+            "list or agenda, complete_task when they say something is done, and delete_task "
+            "to remove an item entirely."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":  {"type": "STRING", "description": "add_task | list_tasks | complete_task | delete_task"},
+                "text":    {"type": "STRING", "description": "Task description (add_task)"},
+                "due":     {"type": "STRING", "description": "Optional due date/time, natural language or YYYY-MM-DD (add_task)"},
+                "task_id": {"type": "STRING", "description": "Exact task id, if known (complete_task/delete_task)"},
+                "query":   {"type": "STRING", "description": "Snippet of task text to match, if id unknown (complete_task/delete_task)"}
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "quick_note",
+        "description": (
+            "Jots down or retrieves short free-form notes. Use action='add' (default) with 'text' "
+            "to save a note. Use action='list' or 'search' with an optional 'query' to retrieve notes."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "add | list | search (default: add)"},
+                "text":   {"type": "STRING", "description": "Note content (add)"},
+                "query":  {"type": "STRING", "description": "Optional search text (list/search)"}
+            },
+            "required": []
+        }
     },
     {
         "name": "shutdown_jarvis",
@@ -870,6 +907,14 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, get_system_status)
                 result = str(r)
 
+            elif name == "manage_task":
+                r = await loop.run_in_executor(None, lambda: manage_task(parameters=args, player=self.ui))
+                result = r or "Done."
+
+            elif name == "quick_note":
+                r = await loop.run_in_executor(None, lambda: quick_note(parameters=args, player=self.ui))
+                result = r or "Done."
+
             elif name == "manage_monitor":
                 action = args.get("action", "").lower().strip()
                 topic  = args.get("topic", "").strip()
@@ -1166,9 +1211,17 @@ class JarvisLive:
                 f" Also briefly and naturally mention that {_when}: {last['summary']}"
             )
 
+        try:
+            _pending = pending_task_count()
+        except Exception:
+            _pending = 0
+        task_clause = (
+            f" Also briefly mention there {'is' if _pending == 1 else 'are'} {_pending} pending task{'s' if _pending != 1 else ''} on their list."
+            if _pending else ""
+        )
         p1 = (
-            f"Greet the user warmly, mention it is {time_str}, and say you are fetching today's news now.{session_clause} "
-            f"Keep it to 2 short sentences max. Do not call any tools.{lang_clause}{name_clause}"
+            f"Greet the user warmly, mention it is {time_str}, and say you are fetching today's news now.{session_clause}{task_clause} "
+            f"Keep it to 2-3 short sentences max. Do not call any tools.{lang_clause}{name_clause}"
         )
 
         # Clear the turn-done event so we can wait for Phase 1 to finish
