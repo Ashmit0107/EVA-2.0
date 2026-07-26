@@ -1727,6 +1727,111 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+class RemindersPanel(QWidget):
+    """Compact scrollable list of upcoming reminders, read from
+    actions/reminder.py's index file (~/.eva/reminders/index.json)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+
+        hdr = QLabel("◈ REMINDERS")
+        hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent; "
+                          f"border-bottom: 1px solid {C.BORDER}; padding-bottom: 4px;")
+        lay.addWidget(hdr)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFixedHeight(112)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(f"""
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ background: {C.BG}; width: 6px; border: none; }}
+            QScrollBar::handle:vertical {{ background: {C.BORDER_B}; border-radius: 3px; min-height: 16px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; border: none; }}
+        """)
+
+        self._list_w = QWidget()
+        self._list_w.setStyleSheet("background: transparent;")
+        self._list_lay = QVBoxLayout(self._list_w)
+        self._list_lay.setContentsMargins(0, 2, 4, 2)
+        self._list_lay.setSpacing(4)
+        self._list_lay.addStretch()
+        self._scroll.setWidget(self._list_w)
+        lay.addWidget(self._scroll)
+
+        self.refresh()
+
+        self._tmr = QTimer(self)
+        self._tmr.timeout.connect(self.refresh)
+        self._tmr.start(15_000)   # re-read the index periodically
+
+    def _load(self) -> list:
+        try:
+            from actions.reminder import _load_index
+            return _load_index()
+        except Exception:
+            return []
+
+    def refresh(self) -> None:
+        # clear existing rows (keep the trailing stretch)
+        while self._list_lay.count() > 1:
+            item = self._list_lay.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        items = self._load()
+        items.sort(key=lambda it: (it.get("date", ""), it.get("time", "")))
+
+        if not items:
+            empty = QLabel("No reminders set")
+            empty.setFont(QFont("Courier New", 7))
+            empty.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            empty.setWordWrap(True)
+            self._list_lay.insertWidget(0, empty)
+            return
+
+        _rec_icon = {"daily": "↻D", "weekly": "↻W", "": ""}
+        for idx, it in enumerate(items):
+            row = QWidget()
+            row.setStyleSheet(
+                f"background: {C.PANEL2}; border: 1px solid {C.BORDER}; border-radius: 4px;"
+            )
+            rlay = QVBoxLayout(row)
+            rlay.setContentsMargins(5, 3, 5, 3)
+            rlay.setSpacing(1)
+
+            top = QHBoxLayout(); top.setSpacing(4)
+            when = QLabel(f"{it.get('date','')[5:]} {it.get('time','')}")
+            when.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            when.setStyleSheet(f"color: {C.ACC2}; background: transparent; border: none;")
+            top.addWidget(when)
+            top.addStretch()
+            rec = _rec_icon.get(it.get("recurrence", ""), "")
+            if rec:
+                rec_lbl = QLabel(rec)
+                rec_lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+                rec_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent; border: none;")
+                top.addWidget(rec_lbl)
+            rlay.addLayout(top)
+
+            msg = it.get("message", "")
+            if len(msg) > 40:
+                msg = msg[:37] + "..."
+            msg_lbl = QLabel(msg)
+            msg_lbl.setFont(QFont("Courier New", 7))
+            msg_lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent; border: none;")
+            msg_lbl.setWordWrap(True)
+            rlay.addWidget(msg_lbl)
+
+            self._list_lay.insertWidget(idx, row)
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -2536,6 +2641,10 @@ class MainWindow(QMainWindow):
         ip_lay.addWidget(os_lbl)
 
         lay.addWidget(info_panel)
+        lay.addSpacing(4)
+
+        self._reminders_panel = RemindersPanel()
+        lay.addWidget(self._reminders_panel)
         lay.addSpacing(4)
 
         lay.addStretch()

@@ -5,7 +5,7 @@ A real-time voice AI that can hear, see, understand, and control your computer �
 
 ## ✨ Overview
 
-MARK L is where the assistant stops being a tool and starts being a presence. It remembers yesterday's conversation, watches the topics you care about, and speaks first when it has something worth saying. The goal of this build was continuity — EVA should feel like it never fully left, even after you close it.
+EVA is where the assistant stops being a tool and starts being a presence. It remembers yesterday's conversation, watches the topics you care about, and speaks first when it has something worth saying. The goal of this build was continuity — EVA should feel like it never fully left, even after you close it.
 
 It's not just an assistant — it's an extension of your digital life.
 
@@ -49,11 +49,11 @@ It's not just an assistant — it's an extension of your digital life.
 
 ---
 
-## 🆕 What's New in Mark L
+## 🆕 What's New in EVA
 
 ### 🗓️ Session Memory — EVA Remembers Yesterday
 At the end of every session, EVA generates a 1-2 sentence summary of what was discussed and saves it to memory. The next morning, it's mentioned naturally in the briefing:
-> *"Good morning, sir — it's 09:15. Yesterday you were working on the Mark L background monitoring feature. Fetching today's headlines now."*
+> *"Good morning, sir — it's 09:15. Yesterday you were working on the EVA background monitoring feature. Fetching today's headlines now."*
 
 The summary is consumed immediately after use — it never repeats in future briefings and adds zero long-term bloat to memory.
 
@@ -119,7 +119,7 @@ python main.py
 ## 🗂️ Project Structure
 
 ```
-Mark L/  (EVA)
+EVA
 ├── main.py                   # Core loop — Gemini Live session, audio I/O, tool dispatch
 ├── ui.py                     # PyQt6 HUD — waveform, log panel, interrupt button, camera feed
 ├── setup.py                  # First-run configuration wizard
