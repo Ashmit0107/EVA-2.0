@@ -150,6 +150,9 @@ Mark L/  (EVA)
 │   └── long_term.json        # Persistent store: identity, preferences, projects, sessions, monitors
 ├── core/
 │   └── prompt.txt            # Assistant personality and tool-routing rules
+├── dashboard/
+│   ├── server.py             # Remote Dashboard — FastAPI/WebSocket server for phone pairing & relay
+│   └── static/               # Dashboard web UI assets
 └── config/
     └── api_keys.json         # API key, OS setting, assistant name, user name
 ```
