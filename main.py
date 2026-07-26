@@ -755,7 +755,7 @@ class EvaLive:
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon"
+                        voice_name="Leda"
                     )
                 )
             ),
@@ -1318,7 +1318,7 @@ class EvaLive:
             client = _genai.Client(api_key=_get_api_key())
             resp   = await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-2.5-flash",
+                model="gemini-flash-latest",
                 contents=prompt,
             )
             summary = (resp.text or "").strip()
