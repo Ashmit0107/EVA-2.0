@@ -2079,12 +2079,18 @@ class IncubationPanel(QWidget):
     are illustrative sample data, not real financial advice."""
 
     _PLAYBOOK = [
-        ("🎬", "Short-form video",   "Quick, catchy videos on TikTok/Reels/Shorts — hook people in the first 2 seconds."),
-        ("🤝", "Influencer / UGC",   "Get real people, even small creators, to genuinely try and talk about your product."),
-        ("💬", "Community-led growth", "Build a Discord/forum where users help each other and spread the word for you."),
-        ("🔍", "SEO / content",       "Write helpful articles that answer questions people search for on Google."),
-        ("🔁", "Retention marketing",  "Keep the customers you already have coming back with emails and offers."),
-        ("🤖", "AI-powered ads",       "Use AI to quickly make and test many ad versions to find what works best."),
+        ("🎬", "Short-form video",   "Quick, catchy videos on TikTok/Reels/Shorts — hook people in the first 2 seconds.",
+         "https://mailchimp.com/resources/short-form-video/"),
+        ("🤝", "Influencer / UGC",   "Get real people, even small creators, to genuinely try and talk about your product.",
+         "https://offers.hubspot.com/influencer-marketing-guide"),
+        ("💬", "Community-led growth", "Build a Discord/forum where users help each other and spread the word for you.",
+         "https://sendbird.com/blog/community-led-growth"),
+        ("🔍", "SEO / content",       "Write helpful articles that answer questions people search for on Google.",
+         "https://developers.google.com/search/docs/fundamentals/seo-starter-guide"),
+        ("🔁", "Retention marketing",  "Keep the customers you already have coming back with emails and offers.",
+         "https://www.klaviyo.com/blog/customer-lifecycle-marketing"),
+        ("🤖", "AI-powered ads",       "Use AI to quickly make and test many ad versions to find what works best.",
+         "https://www.get-ryze.ai/blog/pmax-vs-advantage-plus-comparison"),
     ]
 
     def __init__(self, parent=None):
@@ -2230,7 +2236,7 @@ class IncubationPanel(QWidget):
                                 "Approaches that are working well for new businesses right now."))
         from PyQt6.QtWidgets import QGridLayout
         grid = QGridLayout(); grid.setSpacing(6)
-        for idx, (icon, name, desc) in enumerate(self._PLAYBOOK):
+        for idx, (icon, name, desc, url) in enumerate(self._PLAYBOOK):
             cell = QWidget()
             cell.setStyleSheet(
                 f"background: {C.PANEL}; border: 1px solid {C.BORDER_A}; border-radius: 6px;"
@@ -2247,6 +2253,13 @@ class IncubationPanel(QWidget):
             d.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
             d.setWordWrap(True)
             cv.addWidget(d)
+            link = QLabel(f'<a href="{url}" style="color:{C.ACC};">Learn more \u2197</a>')
+            link.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            link.setStyleSheet("background: transparent;")
+            link.setTextFormat(Qt.TextFormat.RichText)
+            link.setOpenExternalLinks(True)
+            link.setCursor(Qt.CursorShape.PointingHandCursor)
+            cv.addWidget(link)
             grid.addWidget(cell, idx // 2, idx % 2)
         mkt_lay.addLayout(grid)
         lay.addWidget(mkt_card)
