@@ -58,8 +58,7 @@ At the end of every session, EVA generates a 1-2 sentence summary of what was di
 The summary is consumed immediately after use — it never repeats in future briefings and adds zero long-term bloat to memory.
 
 ### 👁️‍🗨️ Background Monitoring — EVA Watches While You're Away
-Tell EVA to monitor any topic and it checks for new developments once a day using DuckDuckGo news. When a headline changes, it reports back naturally in your language:
-> *"Efendim, takip ettiğiniz yapay zeka haberlerinde bir gelişme var: Google yeni bir model duyurdu."*
+Tell EVA to monitor any topic and it checks for new developments once a day using DuckDuckGo news. When a headline changes, it reports back naturally in your language.
 
 Fully opt-in — EVA monitors nothing without being explicitly asked. Crypto, financial, and trading topics are blocked at the code level regardless of what is requested. Same headline never triggers twice.
 
