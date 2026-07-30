@@ -66,6 +66,8 @@ from actions.background_monitor import (
 )
 from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import get_brief_enabled
+from core.tts                  import create_tts_player, TTSPlayer
+from core.tone_manager          import tone_directive, tone_tts_speed, DEFAULT_TONE_KEY
 
 
 def get_base_dir():
@@ -664,6 +666,15 @@ class EvaLive:
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
 
+        # Native/cloned voice toggle (step 6) — voice_mode read fresh from config on each
+        # reconnect in _build_config(); the TTSPlayer for cloned mode is cached here and
+        # only rebuilt if the underlying config (sample path / tone speed) actually changes,
+        # since XTTS-v2 model load is heavy (~2GB, several seconds).
+        self._voice_mode       = "native"   # "native" | "cloned" — decided in _build_config()
+        self._tts_player: TTSPlayer | None = None
+        self._tts_cfg_key      = None       # snapshot of (engine, sample_path, speed) used to build _tts_player
+        self._cloned_speaking  = False      # True while local TTS is synthesizing/playing
+
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
         if self._dashboard is None:
@@ -710,6 +721,12 @@ class EvaLive:
                     break
             if drained:
                 print(f"[EVA] ✋ Interrupted — {drained} audio chunks discarded")
+        if self._cloned_speaking and self._tts_player:
+            try:
+                self._tts_player.stop()
+            except Exception:
+                pass
+            self._cloned_speaking = False
         self.set_speaking(False)
         if self._turn_done_event:
             self._turn_done_event.clear()
@@ -731,6 +748,36 @@ class EvaLive:
         self.ui.write_log(f"ERR: {tool_name} — {short}")
         self.speak(f"Sir, {tool_name} encountered an error. {short}")
 
+    async def _speak_cloned(self, text: str) -> None:
+        """Synthesize+play a completed turn's text via the local XTTS-v2 TTSPlayer
+        (cloned-voice mode). Runs the blocking synth/playback in a thread executor
+        so the asyncio event loop (mic, tool calls, etc.) is never blocked.
+        """
+        if not self._tts_player or not text:
+            return
+        loop = asyncio.get_event_loop()
+        self._cloned_speaking = True
+        self.set_speaking(True)
+        try:
+            await loop.run_in_executor(None, self._tts_player.speak, text)
+        except Exception as e:
+            # Missing model (still downloading), bad sample, or a transient synthesis
+            # error — don't leave the user without any audio for this turn. Fall back
+            # to a lightweight, always-available engine (EdgeTTS, free/no local model)
+            # just for this one utterance rather than going silent. Cloned mode itself
+            # stays selected — next turn tries XTTS again.
+            print(f"[EVA] ⚠️ Cloned-voice synthesis failed: {e}")
+            self.ui.write_log(f"ERR: Cloned voice — {str(e)[:120]} (using fallback voice for this reply)")
+            try:
+                from core.tts import EdgeTTSEngine
+                await loop.run_in_executor(None, EdgeTTSEngine().speak, text)
+            except Exception as fallback_err:
+                print(f"[EVA] ⚠️ Fallback voice also failed: {fallback_err}")
+                self.ui.write_log(f"ERR: Fallback voice failed too — {str(fallback_err)[:120]} (text-only this turn)")
+        finally:
+            self._cloned_speaking = False
+            self.set_speaking(False)
+
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
 
@@ -740,8 +787,37 @@ class EvaLive:
             self._asst_name = (_cfg.get("assistant_name") or "EVA").strip()
             _user_name = (_cfg.get("user_name") or "").strip()
         except Exception:
+            _cfg = {}
             self._asst_name = "EVA"
             _user_name = ""
+
+        _tone_key = (_cfg.get("selected_tone") or DEFAULT_TONE_KEY).strip()
+        _requested_voice_mode = (_cfg.get("voice_mode") or "native").strip().lower()
+        if _requested_voice_mode not in ("native", "cloned"):
+            _requested_voice_mode = "native"
+
+        self._voice_mode = "native"   # actual mode used this session — may fall back below
+        if _requested_voice_mode == "cloned":
+            _sample_path = (_cfg.get("voice_sample_path") or "").strip()
+            _tts_cfg = {
+                "tts_engine":       "xtts_clone",
+                "voice_sample_path": _sample_path,
+                "tts_language":     (_cfg.get("tts_language") or "en").strip(),
+                "tts_speed":        tone_tts_speed(_tone_key),
+            }
+            _cfg_key = (_tts_cfg["tts_engine"], _tts_cfg["voice_sample_path"],
+                        _tts_cfg["tts_language"], _tts_cfg["tts_speed"])
+            try:
+                if self._tts_player is None or self._tts_cfg_key != _cfg_key:
+                    self._tts_player = create_tts_player(_tts_cfg)
+                    self._tts_cfg_key = _cfg_key
+                self._voice_mode = "cloned"
+            except Exception as e:
+                # Missing/invalid sample, missing packages, model load failure, etc. —
+                # fall back to native Gemini audio for this session rather than crashing.
+                print(f"[EVA] ⚠️ Cloned voice unavailable, falling back to native: {e}")
+                self.ui.write_log(f"SYS: Cloned voice unavailable ({e}) — using native voice.")
+                self._voice_mode = "native"
 
         memory     = load_memory()
         mem_str    = format_memory_for_prompt(memory)
@@ -767,10 +843,25 @@ class EvaLive:
             f"{_addr}\n\n"
         )
 
-        parts = [time_ctx, identity_ctx]
+        tone_ctx = f"[TONE]\n{tone_directive(_tone_key)}\n\n"
+
+        parts = [time_ctx, identity_ctx, tone_ctx]
         if mem_str:
             parts.append(mem_str)
         parts.append(sys_prompt)
+
+        # Native mode: Gemini speaks directly (AUDIO modality + prebuilt voice).
+        # Cloned mode: Gemini replies in TEXT only; EvaLive._receive_audio() synthesizes
+        # that text locally via self._tts_player (XTTS-v2) once each turn completes.
+        if self._voice_mode == "cloned":
+            return types.LiveConnectConfig(
+                response_modalities=["TEXT"],
+                output_audio_transcription={},
+                input_audio_transcription={},
+                system_instruction="\n".join(parts),
+                tools=[{"function_declarations": TOOL_DECLARATIONS}],
+                session_resumption=types.SessionResumptionConfig(),
+            )
 
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -1054,6 +1145,16 @@ class EvaLive:
                             for _i in range(0, len(_audio_data), _SLICE):
                                 self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
 
+                    # Cloned-voice mode: response_modalities=["TEXT"] means Gemini never
+                    # sends response.data (no native audio) or output_transcription — the
+                    # spoken text arrives directly as response.text instead. Buffer it the
+                    # same way as out_buf below so logging/session-summary code is shared;
+                    # synthesis is triggered from the turn_complete handler further down.
+                    if getattr(response, "text", None) and not self._interrupted:
+                        txt = _clean_transcript(response.text)
+                        if txt and txt != (out_buf[-1] if out_buf else ""):
+                            out_buf.append(txt)
+
                     if response.server_content:
                         sc = response.server_content
 
@@ -1102,6 +1203,8 @@ class EvaLive:
                                         "text": full_out,
                                         "ts": datetime.now().isoformat(),
                                     }))
+                                if self._voice_mode == "cloned" and self._tts_player:
+                                    asyncio.create_task(self._speak_cloned(full_out))
                             out_buf = []
 
                             # Vision injection: model finished tool-response turn → now send the image

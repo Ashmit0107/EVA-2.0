@@ -42,6 +42,7 @@ def _base_dir() -> Path:
 BASE_DIR   = _base_dir()
 CONFIG_DIR = BASE_DIR / "config"
 API_FILE   = CONFIG_DIR / "api_keys.json"
+VOICE_SAMPLES_DIR = CONFIG_DIR / "voice_samples"
 
 
 def _read_full_config() -> dict:
@@ -1247,6 +1248,313 @@ class SetupOverlay(QWidget):
             )
             return
         self.done.emit("\n".join(keys[:5]), self._sel_os)
+
+
+class VoiceCloneOverlay(QWidget):
+    """Upload or record a reference clip for EVA's cloned voice (XTTS-v2).
+
+    Emits `saved(path)` with the absolute path of the saved WAV once the
+    user has either picked a file or finished a mic recording of at least
+    MIN_SECONDS. Does NOT touch config itself — the caller persists
+    voice_sample_path / voice_mode.
+    """
+    saved = pyqtSignal(str)
+
+    MIN_SECONDS = 3.0
+    MAX_SECONDS = 30.0
+    _SR = 16000
+
+    def __init__(self, parent=None, current_sample: str = ""):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            VoiceCloneOverlay {{
+                background: rgba(0, 6, 10, 245);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+        """)
+        self._recording  = False
+        self._rec_frames: list = []
+        self._rec_stream  = None
+        self._picked_path = current_sample or ""
+
+        def _lbl(txt, font_size=9, bold=False, color=C.PRI,
+                 align=Qt.AlignmentFlag.AlignCenter):
+            w = QLabel(txt)
+            w.setAlignment(align)
+            w.setFont(QFont("Courier New", font_size,
+                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            return w
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 20, 28, 20)
+        layout.setSpacing(8)
+
+        layout.addWidget(_lbl("🎙  CLONE MY VOICE", 13, True))
+        layout.addWidget(_lbl("6-30s of clean speech. Runs locally — never leaves your PC.",
+                              8, color=C.PRI_DIM))
+        layout.addSpacing(6)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep)
+        layout.addSpacing(4)
+
+        self._status_lbl = _lbl(
+            f"Current sample: {Path(current_sample).name}" if current_sample else "No sample set yet.",
+            8, color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft,
+        )
+        layout.addWidget(self._status_lbl)
+        layout.addSpacing(6)
+
+        upload_btn = QPushButton("📁  UPLOAD AN AUDIO FILE")
+        upload_btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        upload_btn.setFixedHeight(32)
+        upload_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        upload_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px;
+            }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
+        """)
+        upload_btn.clicked.connect(self._upload)
+        layout.addWidget(upload_btn)
+
+        layout.addWidget(_lbl("— or —", 8, color=C.TEXT_DIM))
+
+        self._rec_btn = QPushButton("⏺  RECORD FROM MIC")
+        self._rec_btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        self._rec_btn.setFixedHeight(32)
+        self._rec_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rec_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.ACC2};
+                border: 1px solid {C.ACC2}; border-radius: 3px;
+            }}
+            QPushButton:hover {{ background: rgba(255,180,0,30); }}
+        """)
+        self._rec_btn.clicked.connect(self._toggle_record)
+        layout.addWidget(self._rec_btn)
+
+        self._rec_timer = QTimer(self)
+        self._rec_timer.setInterval(200)
+        self._rec_timer.timeout.connect(self._tick_recording)
+        self._rec_elapsed = 0.0
+
+        layout.addSpacing(10)
+        save_btn = QPushButton("▸  SAVE")
+        save_btn.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        save_btn.setFixedHeight(34)
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.GREEN};
+                border: 1px solid {C.GREEN}; border-radius: 3px;
+            }}
+            QPushButton:hover {{ background: rgba(0,255,120,25); }}
+        """)
+        save_btn.clicked.connect(self._submit)
+        layout.addWidget(save_btn)
+
+    def _upload(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select a voice sample", str(Path.home()),
+            "Audio (*.wav *.mp3 *.m4a *.flac *.ogg)",
+        )
+        if not path:
+            return
+        # Validate duration up front (recording already enforces this; uploads didn't).
+        # A too-short or unreadable clip is rejected here instead of surfacing as a
+        # confusing XTTS synthesis failure later.
+        try:
+            import soundfile as sf
+            info = sf.info(path)
+            duration = info.frames / float(info.samplerate or 1)
+        except Exception:
+            # soundfile/libsndfile can't read some containers (e.g. m4a on older
+            # libsndfile) even though they're valid — don't block a legitimate
+            # upload just because we couldn't sniff its duration. XTTS itself
+            # (via ffmpeg/torchaudio) has broader format support and will raise
+            # a clear error at synthesis time if the file is genuinely bad.
+            self._picked_path = path
+            self._status_lbl.setText(f"Selected: {Path(path).name} (duration unknown)")
+            return
+        if duration < self.MIN_SECONDS:
+            self._status_lbl.setText(
+                f"Too short ({duration:.1f}s) — need at least {self.MIN_SECONDS:.0f}s. Pick another file."
+            )
+            self._picked_path = ""
+            return
+        self._picked_path = path
+        self._status_lbl.setText(f"Selected: {Path(path).name} ({duration:.1f}s)")
+
+    def _toggle_record(self):
+        if self._recording:
+            self._stop_record()
+        else:
+            self._start_record()
+
+    def _start_record(self):
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            self._status_lbl.setText(f"Mic unavailable: {e}")
+            return
+        self._rec_frames = []
+        self._recording  = True
+        self._rec_elapsed = 0.0
+        self._rec_btn.setText("⏹  STOP RECORDING")
+        self._status_lbl.setText("Recording… 0.0s")
+
+        def _callback(indata, frames, time_info, status):
+            self._rec_frames.append(indata.copy())
+
+        self._rec_stream = sd.InputStream(
+            samplerate=self._SR, channels=1, dtype="float32", callback=_callback,
+        )
+        self._rec_stream.start()
+        self._rec_timer.start()
+
+    def _tick_recording(self):
+        self._rec_elapsed += 0.2
+        self._status_lbl.setText(f"Recording… {self._rec_elapsed:.1f}s")
+        if self._rec_elapsed >= self.MAX_SECONDS:
+            self._stop_record()
+
+    def _stop_record(self):
+        self._rec_timer.stop()
+        if self._rec_stream is not None:
+            self._rec_stream.stop()
+            self._rec_stream.close()
+            self._rec_stream = None
+        self._recording = False
+        self._rec_btn.setText("⏺  RECORD FROM MIC")
+
+        if self._rec_elapsed < self.MIN_SECONDS or not self._rec_frames:
+            self._status_lbl.setText(
+                f"Too short ({self._rec_elapsed:.1f}s) — need at least {self.MIN_SECONDS:.0f}s. Try again."
+            )
+            self._picked_path = ""
+            return
+
+        try:
+            import numpy as np
+            import soundfile as sf
+            VOICE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+            out_path = VOICE_SAMPLES_DIR / "user_voice.wav"
+            audio = np.concatenate(self._rec_frames, axis=0)
+            sf.write(str(out_path), audio, self._SR)
+            self._picked_path = str(out_path)
+            self._status_lbl.setText(f"Recorded {self._rec_elapsed:.1f}s — saved as {out_path.name}")
+        except Exception as e:
+            self._status_lbl.setText(f"Save failed: {e}")
+            self._picked_path = ""
+
+    def _submit(self):
+        if self._recording:
+            self._stop_record()
+        if not self._picked_path:
+            self._status_lbl.setText("Pick a file or record a sample first.")
+            return
+        self.saved.emit(self._picked_path)
+
+
+class TonePickerOverlay(QWidget):
+    """Lets the user pick EVA's conversational tone (Professional / Friendly /
+    Parenting / Playful / Calm-Zen). Used both for the first-run onboarding
+    question and for later changes from Settings.
+    """
+    saved = pyqtSignal(str)
+
+    def __init__(self, parent=None, current_tone: str = "", onboarding: bool = False):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            TonePickerOverlay {{
+                background: rgba(0, 6, 10, 245);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+        """)
+        from core.tone_manager import all_tones, DEFAULT_TONE_KEY
+        self._sel_tone = current_tone or DEFAULT_TONE_KEY
+
+        def _lbl(txt, font_size=9, bold=False, color=C.PRI,
+                 align=Qt.AlignmentFlag.AlignCenter):
+            w = QLabel(txt)
+            w.setAlignment(align)
+            w.setWordWrap(True)
+            w.setFont(QFont("Courier New", font_size,
+                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            return w
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 20, 28, 20)
+        layout.setSpacing(8)
+
+        title = ("🎭  HOW SHOULD I TALK WITH YOU?" if onboarding
+                 else "🎭  CHOOSE A TONE")
+        layout.addWidget(_lbl(title, 12, True))
+        sub = ("Pick whichever feels most like home — you can change this any time."
+               if onboarding else
+               "Shapes how EVA talks and, in cloned-voice mode, how it sounds.")
+        layout.addWidget(_lbl(sub, 8, color=C.PRI_DIM))
+        layout.addSpacing(6)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep)
+        layout.addSpacing(4)
+
+        self._tone_btns: dict[str, QPushButton] = {}
+        for preset in all_tones():
+            btn = QPushButton(preset.label)
+            btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+            btn.setFixedHeight(30)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _, k=preset.key: self._select(k))
+            layout.addWidget(btn)
+            self._tone_btns[preset.key] = btn
+        self._restyle_buttons()
+        layout.addSpacing(10)
+
+        confirm_btn = QPushButton("▸  CONFIRM")
+        confirm_btn.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        confirm_btn.setFixedHeight(34)
+        confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        confirm_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.GREEN};
+                border: 1px solid {C.GREEN}; border-radius: 3px;
+            }}
+            QPushButton:hover {{ background: rgba(0,255,120,25); }}
+        """)
+        confirm_btn.clicked.connect(lambda: self.saved.emit(self._sel_tone))
+        layout.addWidget(confirm_btn)
+
+    def _select(self, key: str):
+        self._sel_tone = key
+        self._restyle_buttons()
+
+    def _restyle_buttons(self):
+        for key, btn in self._tone_btns.items():
+            if key == self._sel_tone:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {C.PRI}; color: #001a22;
+                        border: none; border-radius: 3px; font-weight: bold;
+                    }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: #000d12; color: {C.TEXT_DIM};
+                        border: 1px solid {C.BORDER}; border-radius: 3px;
+                    }}
+                    QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+                """)
 
 
 class HueWheel(QWidget):
@@ -2502,6 +2810,7 @@ class MainWindow(QMainWindow):
         self._update_autostart_btn(self._check_autostart())
         from memory.config_manager import get_brief_enabled as _gbe
         self._update_brief_btn(_gbe())
+        self._update_voice_mode_btn((_cfg.get("voice_mode") or "native").strip().lower())
 
         self._clock_tmr = QTimer(self)
         self._clock_tmr.timeout.connect(self._tick_clock)
@@ -2536,6 +2845,10 @@ class MainWindow(QMainWindow):
         self._ready = self._check_config()
         if not self._ready:
             self._show_setup()
+        elif not _read_full_config().get("selected_tone"):
+            # Existing/already-configured user who predates the tone feature —
+            # ask once here too, since _on_setup_done() only fires on fresh setup.
+            QTimer.singleShot(400, lambda: self._open_tone_picker(onboarding=True))
 
         sc_mute = QShortcut(QKeySequence("F4"), self)
         sc_mute.activated.connect(self._toggle_mute)
@@ -3494,6 +3807,32 @@ class MainWindow(QMainWindow):
         keys_btn.clicked.connect(self._open_key_manager)
         lay.addWidget(keys_btn)
 
+        voice_btn = QPushButton("🎙  CLONE MY VOICE")
+        voice_btn.setFixedHeight(26)
+        voice_btn.setFont(QFont("Courier New", 7))
+        voice_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        voice_btn.setStyleSheet(_BTN_STYLE_DIM)
+        voice_btn.setToolTip("Upload or record a sample so EVA can speak in your voice (local, free)")
+        voice_btn.clicked.connect(self._open_voice_clone_manager)
+        lay.addWidget(voice_btn)
+
+        tone_btn = QPushButton("🎭  CHOOSE TONE")
+        tone_btn.setFixedHeight(26)
+        tone_btn.setFont(QFont("Courier New", 7))
+        tone_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        tone_btn.setStyleSheet(_BTN_STYLE_DIM)
+        tone_btn.setToolTip("Professional / Friendly / Parenting / Playful / Calm-Zen")
+        tone_btn.clicked.connect(lambda: self._open_tone_picker(onboarding=False))
+        lay.addWidget(tone_btn)
+
+        self._voice_mode_btn = QPushButton()
+        self._voice_mode_btn.setFixedHeight(26)
+        self._voice_mode_btn.setFont(QFont("Courier New", 7))
+        self._voice_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._voice_mode_btn.setToolTip("Toggle between Gemini's native voice and your cloned voice (XTTS-v2, local). Takes effect on next reconnect.")
+        self._voice_mode_btn.clicked.connect(self._toggle_voice_mode)
+        lay.addWidget(self._voice_mode_btn)
+
         self._brief_btn = QPushButton()
         self._brief_btn.setFixedHeight(26)
         self._brief_btn.setFont(QFont("Courier New", 7))
@@ -3825,6 +4164,64 @@ class MainWindow(QMainWindow):
                 QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
             """)
 
+    def _toggle_voice_mode(self):
+        """Flip voice_mode between 'native' (Gemini's built-in voice) and 'cloned'
+        (local XTTS-v2 using the uploaded/recorded sample). Persists to config;
+        takes effect on the next Gemini Live reconnect (main.py rebuilds the
+        session config, including response modality, from this value).
+        """
+        cfg = _read_full_config()
+        current = (cfg.get("voice_mode") or "native").strip().lower()
+        if current == "cloned":
+            new_mode = "native"
+        else:
+            if not cfg.get("voice_sample_path"):
+                self._log.append_log(
+                    "SYS: No voice sample yet — use '🎙 CLONE MY VOICE' first."
+                )
+                return
+            new_mode = "cloned"
+        try:
+            cfg["voice_mode"] = new_mode
+            API_FILE.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+            self._update_voice_mode_btn(new_mode)
+            label = "Cloned voice" if new_mode == "cloned" else "Native voice"
+            self._log.append_log(f"SYS: Voice mode set — {label} (applies on next reconnect).")
+            if new_mode == "cloned" and not cfg.get("_xtts_model_seen"):
+                self._log.append_log(
+                    "SYS: First cloned-voice reconnect downloads the XTTS-v2 model "
+                    "(~2GB, one-time, needs internet) — EVA may be quiet for a bit "
+                    "while that finishes; it's cached after that."
+                )
+                cfg["_xtts_model_seen"] = True
+                API_FILE.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+        except Exception as e:
+            self._log.append_log(f"ERR: Voice mode save failed — {e}")
+
+    def _update_voice_mode_btn(self, mode: str):
+        if not hasattr(self, '_voice_mode_btn'):
+            return
+        if mode == "cloned":
+            self._voice_mode_btn.setText("🔊  VOICE: CLONED")
+            self._voice_mode_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #001a08; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ background: #002010; }}
+            """)
+        else:
+            self._voice_mode_btn.setText("🔊  VOICE: NATIVE")
+            self._voice_mode_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+            """)
+
     def _toggle_brief(self):
         from memory.config_manager import get_brief_enabled, save_brief_enabled
         new_val = not get_brief_enabled()
@@ -3907,6 +4304,66 @@ class MainWindow(QMainWindow):
             ov.hide()
 
         ov.done.connect(_on_keys_done)
+        ov.show()
+
+    # ── Voice cloning ─────────────────────────────────────────────────────────────────────────
+
+    def _open_voice_clone_manager(self):
+        cfg = _read_full_config()
+        current_sample = cfg.get("voice_sample_path", "")
+
+        cw  = self.centralWidget()
+        ov  = VoiceCloneOverlay(cw, current_sample=current_sample)
+        ow, oh = 460, 400
+        ov.setGeometry(
+            (cw.width()  - ow) // 2,
+            (cw.height() - oh) // 2,
+            ow, oh,
+        )
+
+        def _on_saved(path: str):
+            try:
+                data = _read_full_config()
+                data["voice_sample_path"] = path
+                API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+                self._log.append_log(f"SYS: Voice sample saved — {Path(path).name}. "
+                                      "Switch to cloned voice mode in Settings to use it.")
+            except Exception as e:
+                self._log.append_log(f"ERR: Voice sample save failed — {e}")
+            ov.hide()
+
+        ov.saved.connect(_on_saved)
+        ov.show()
+
+    # ── Tone picker ───────────────────────────────────────────────────────────────────────────
+
+    def _open_tone_picker(self, onboarding: bool = False):
+        from core.tone_manager import get_tone
+
+        cfg = _read_full_config()
+        current_tone = cfg.get("selected_tone", "")
+
+        cw  = self.centralWidget()
+        ov  = TonePickerOverlay(cw, current_tone=current_tone, onboarding=onboarding)
+        ow, oh = 380, 400
+        ov.setGeometry(
+            (cw.width()  - ow) // 2,
+            (cw.height() - oh) // 2,
+            ow, oh,
+        )
+
+        def _on_saved(tone_key: str):
+            try:
+                data = _read_full_config()
+                data["selected_tone"] = tone_key
+                API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+                label = get_tone(tone_key).label
+                self._log.append_log(f"SYS: Tone set — {label}.")
+            except Exception as e:
+                self._log.append_log(f"ERR: Tone save failed — {e}")
+            ov.hide()
+
+        ov.saved.connect(_on_saved)
         ov.show()
 
     def _apply_name_update(self, name: str, user_name: str, ui_color: str = ""):
@@ -4073,6 +4530,11 @@ class MainWindow(QMainWindow):
         self._apply_state("LISTENING")
         self._assistant_name = _read_full_config().get("assistant_name", "EVA") or "EVA"
         self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. {self._assistant_name} online.")
+
+        # First-run onboarding: ask the user's preferred tone once, if not already set
+        if not _read_full_config().get("selected_tone"):
+            self._open_tone_picker(onboarding=True)
+
 
 class _RootShim:
     def __init__(self, app: QApplication):

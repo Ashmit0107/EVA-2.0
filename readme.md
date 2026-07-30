@@ -124,12 +124,32 @@ EVA
 │   ├── memory_manager.py     # Load/save long_term.json — sessions, monitors, identity
 │   └── long_term.json        # Persistent store: identity, preferences, projects, sessions, monitors
 ├── core/
-│   └── prompt.txt            # Assistant personality and tool-routing rules
+│   ├── prompt.txt            # Assistant personality and tool-routing rules
+│   ├── gemini_keys.py        # .env-backed Gemini API key rotation
+│   ├── voice_clone.py        # (planned) XTTS-v2 voice cloning from a user-supplied sample
+│   └── tone_manager.py       # (planned) Professional/Friendly/Parenting/Playful/Calm tone presets
 ├── dashboard/
 │   ├── server.py             # Remote Dashboard — FastAPI/WebSocket server for phone pairing & relay
 │   └── static/               # Dashboard web UI assets
 └── config/
-    └── api_keys.json         # API key, OS setting, assistant name, user name
+    ├── api_keys.json         # Non-secret settings: OS, assistant name, user name, voice_mode, tone
+    └── voice_samples/        # (planned) user's uploaded/recorded voice-clone reference clip
 ```
+
+---
+
+## 🗣️ Voice cloning (optional, local, free)
+
+EVA can speak in a voice you provide instead of the default Gemini voice.
+
+- Upload or record a 6–30 second clean audio clip from the Settings panel.
+- EVA uses **Coqui XTTS-v2** running locally on your machine — no per-use cost, no data leaves your PC.
+- The **first time** you switch to cloned voice mode, XTTS-v2 downloads its model (~2GB) and asks you to accept Coqui's non-commercial license once, in the terminal.
+- A **native/cloned toggle** lets you switch back to Gemini's built-in voice at any time — cloning never replaces the default, it sits alongside it.
+- Cloned voice mode adds a short text-to-speech step, so responses are slightly slower than Gemini's native audio.
+
+## 🎭 Conversational tone
+
+On first setup (or any time from Settings), EVA asks which tone you'd like: **Professional, Friendly, Parenting, Playful,** or **Calm/Zen**. This shapes both what EVA says and, in cloned-voice mode, how it's delivered.
 
 ---

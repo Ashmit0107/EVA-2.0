@@ -376,6 +376,76 @@ class ElevenLabsTTSEngine:
         _play_audio_bytes(resp.content)
 
 
+class XTTSCloneEngine:
+    """Local, free voice cloning via Coqui XTTS-v2.
+
+    Takes a short reference clip (speaker_wav, ideally 6-30 s of clean speech)
+    and synthesizes any text in that voice, entirely on-device — no API key,
+    no per-use cost, no audio leaves the machine.
+
+    First construction downloads the XTTS-v2 model (~2 GB) and requires a
+    one-time acceptance of Coqui's non-commercial license in the terminal.
+    The model is cached after that and loads from disk on subsequent runs.
+
+    A tone preset (see core/tone_manager.py) can supply a speed hint via
+    the `speed` constructor arg — XTTS exposes limited prosody control
+    beyond overall speaking rate.
+    """
+
+    _MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"
+
+    def __init__(self, speaker_wav: str, language: str = "en", speed: float = 1.0):
+        if not speaker_wav or not os.path.isfile(speaker_wav):
+            raise RuntimeError(
+                f"Voice sample not found: {speaker_wav!r}. "
+                "Upload or record a 6-30s clip in Settings → Clone my voice."
+            )
+        self.speaker_wav = speaker_wav
+        self.language    = language
+        self.speed       = speed
+        self._model      = None
+        self._lock       = threading.Lock()
+
+    def _ensure_loaded(self) -> None:
+        if self._model is not None:
+            return
+        with self._lock:
+            if self._model is not None:
+                return
+            print("[TTS] XTTS-v2 — loading (first run downloads ~2GB model + one-time license prompt)…")
+            try:
+                import torch
+                from TTS.api import TTS as _CoquiTTS
+            except ImportError as e:
+                raise RuntimeError(
+                    "Voice cloning requires the coqui-tts and torch packages.\n"
+                    "Run: pip install coqui-tts torch soundfile"
+                ) from e
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            try:
+                self._model = _CoquiTTS(self._MODEL_NAME).to(device)
+            except Exception as e:
+                raise RuntimeError(
+                    f"XTTS-v2 model failed to load or download: {e}\n"
+                    "Check your internet connection for the first-run download, "
+                    "or accept the Coqui license prompt in the terminal if it is waiting there."
+                ) from e
+            print(f"[TTS] XTTS-v2 ready (device={device}).")
+
+    def speak(self, text: str) -> None:
+        self._ensure_loaded()
+        try:
+            wav = self._model.tts(
+                text=text,
+                speaker_wav=self.speaker_wav,
+                language=self.language,
+                speed=self.speed,
+            )
+        except Exception as e:
+            raise RuntimeError(f"XTTS-v2 synthesis failed: {e}") from e
+        _play_np(wav, 24000)
+
+
 # ---------------------------------------------------------------------------
 # Thread-safe player wrapper
 # ---------------------------------------------------------------------------
@@ -436,6 +506,11 @@ def create_tts_player(config: dict) -> TTSPlayer:
         api_key  = config.get("elevenlabs_api_key", "")
         voice_id = config.get("tts_voice", "pNInz6obpgDQGcFmaJgB")
         engine   = ElevenLabsTTSEngine(api_key=api_key, voice_id=voice_id)
+    elif engine_name == "xtts_clone":
+        speaker_wav = config.get("voice_sample_path", "")
+        language    = config.get("tts_language", "en")
+        speed       = float(config.get("tts_speed", 1.0))
+        engine      = XTTSCloneEngine(speaker_wav=speaker_wav, language=language, speed=speed)
     else:   # edgetts (default)
         voice  = config.get("tts_voice", "en-US-GuyNeural")
         engine = EdgeTTSEngine(voice=voice)
