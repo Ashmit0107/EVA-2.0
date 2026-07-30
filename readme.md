@@ -9,7 +9,7 @@ EVA is where the assistant stops being a tool and starts being a presence. It re
 
 It's not just an assistant — it's an extension of your digital life.
 
-------------------------------------------------
+----------
 
 ## 🚀 Capabilities
 
