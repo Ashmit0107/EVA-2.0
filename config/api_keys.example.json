@@ -1,15 +1,7 @@
 {
-    "gemini_api_key": "YOUR_GEMINI_API_KEY_HERE",
     "os_system": "windows",
     "assistant_name": "EVA",
     "user_name": "Paul",
     "ui_color": "#00fcff",
-    "morning_brief_enabled": true,
-    "gemini_api_keys": [
-        "YOUR_GEMINI_API_KEY_1",
-        "YOUR_GEMINI_API_KEY_2",
-        "YOUR_GEMINI_API_KEY_3",
-        "YOUR_GEMINI_API_KEY_4",
-        "YOUR_GEMINI_API_KEY_5"
-    ]
+    "morning_brief_enabled": true
 }

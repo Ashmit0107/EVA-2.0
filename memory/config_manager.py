@@ -18,21 +18,15 @@ def config_exists() -> bool:
     return CONFIG_FILE.exists()
 
 def save_api_keys(gemini_api_key: str) -> None:
-    ensure_config_dir()
-
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-
-    data["gemini_api_key"] = gemini_api_key.strip()
-
-    CONFIG_FILE.write_text(
-        json.dumps(data, indent=2),
-        encoding="utf-8"
-    )
+    """Legacy single-key setter — now redirects to the .env-backed store
+    in core.gemini_keys instead of writing to api_keys.json."""
+    from core.gemini_keys import set_all_keys, get_all_keys
+    existing = get_all_keys()
+    key = gemini_api_key.strip()
+    if not key:
+        return
+    keys = [key] + [k for k in existing if k != key]
+    set_all_keys(keys)
 
 def load_api_keys() -> dict:
     if not CONFIG_FILE.exists():
@@ -44,7 +38,10 @@ def load_api_keys() -> dict:
         return {}
 
 def get_gemini_key() -> str | None:
-    return load_api_keys().get("gemini_api_key")
+    """Returns the first configured Gemini key from .env, or None."""
+    from core.gemini_keys import get_all_keys
+    keys = get_all_keys()
+    return keys[0] if keys else None
 
 def is_configured() -> bool:
     key = get_gemini_key()

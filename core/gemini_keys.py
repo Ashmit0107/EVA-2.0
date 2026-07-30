@@ -1,20 +1,31 @@
 """
 Multi-key Gemini API rotation.
 
-Stores up to 5 Gemini API keys in config/api_keys.json under "gemini_api_keys"
-(a list). Falls back to the legacy single "gemini_api_key" field if the list
-is empty, so existing configs keep working without migration.
+Keys now live ONLY in the .env file at the project root, under the
+GEMINI_API_KEYS env var (comma-separated, up to 5). They are never written
+to config/api_keys.json anymore — that file was previously committed to git
+by mistake and must only ever hold non-secret settings.
+
+If no keys are found in .env, get_all_keys() returns an empty list and the
+existing UI setup / "Manage Gemini Keys" overlay prompts the user, then
+set_all_keys() persists whatever they enter back into .env.
 
 Whenever a call hits a quota / rate-limit error (HTTP 429 / RESOURCE_EXHAUSTED),
 the offending key is marked "exhausted" for a cooldown window and the rotation
 cursor advances to the next configured key — so callers automatically spread
 load across all 5 keys instead of failing the moment one hits its quota.
 """
-import json
 import sys
 import threading
 import time
 from pathlib import Path
+
+try:
+    from dotenv import load_dotenv, dotenv_values, set_key
+except ImportError:  # pragma: no cover - dotenv should always be installed
+    load_dotenv = None
+    dotenv_values = None
+    set_key = None
 
 
 def _base_dir() -> Path:
@@ -23,8 +34,9 @@ def _base_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-BASE_DIR    = _base_dir()
-CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
+BASE_DIR = _base_dir()
+ENV_PATH = BASE_DIR / ".env"
+ENV_VAR  = "GEMINI_API_KEYS"
 
 MAX_KEYS       = 5
 _COOLDOWN_SECS = 5 * 60   # how long an exhausted key is skipped before retrying it
@@ -33,40 +45,69 @@ _lock      = threading.Lock()
 _cursor    = 0                        # index of the "current" key in rotation
 _exhausted: dict[str, float] = {}     # key -> timestamp it was marked exhausted
 
+# Load .env once at import time so os.environ has the keys available
+# for the whole process (main.py also calls load_dotenv() at startup —
+# calling it again here is harmless and keeps this module self-sufficient
+# even if it's imported before main.py runs).
+if load_dotenv is not None:
+    load_dotenv(dotenv_path=ENV_PATH, override=False)
 
-def _load_config() -> dict:
-    try:
-        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+
+def _ensure_env_file() -> None:
+    if not ENV_PATH.exists():
+        ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ENV_PATH.write_text("", encoding="utf-8")
 
 
-def _save_config(cfg: dict) -> None:
-    try:
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
-    except Exception as e:
-        print(f"[GeminiKeys] ⚠️ Could not save config: {e}")
+def _read_env_keys() -> list[str]:
+    """Read GEMINI_API_KEYS straight from the .env file (source of truth),
+    falling back to the current process environment if dotenv isn't available."""
+    raw = ""
+    if dotenv_values is not None and ENV_PATH.exists():
+        raw = (dotenv_values(ENV_PATH).get(ENV_VAR) or "").strip()
+    if not raw:
+        import os
+        raw = (os.environ.get(ENV_VAR) or "").strip()
+    if not raw:
+        return []
+    return [k.strip() for k in raw.split(",") if k.strip()]
+
+
+def _write_env_keys(keys: list[str]) -> None:
+    _ensure_env_file()
+    value = ",".join(keys)
+    if set_key is not None:
+        set_key(str(ENV_PATH), ENV_VAR, value, quote_mode="never")
+    else:
+        # Minimal fallback if python-dotenv isn't installed for some reason
+        lines = []
+        replaced = False
+        if ENV_PATH.exists():
+            for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+                if line.startswith(f"{ENV_VAR}="):
+                    lines.append(f"{ENV_VAR}={value}")
+                    replaced = True
+                else:
+                    lines.append(line)
+        if not replaced:
+            lines.append(f"{ENV_VAR}={value}")
+        ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # keep the current process' env in sync too
+    import os
+    os.environ[ENV_VAR] = value
 
 
 def get_all_keys() -> list[str]:
     """
-    Returns all configured Gemini keys (up to 5).
-    Falls back to the single legacy 'gemini_api_key' if 'gemini_api_keys' is empty.
+    Returns all configured Gemini keys (up to 5), read from .env.
     """
-    cfg  = _load_config()
-    keys = [k.strip() for k in cfg.get("gemini_api_keys", []) if k and k.strip()]
-    if not keys:
-        legacy = (cfg.get("gemini_api_key") or "").strip()
-        if legacy:
-            keys = [legacy]
-    return keys[:MAX_KEYS]
+    return _read_env_keys()[:MAX_KEYS]
 
 
 def set_all_keys(keys: list[str]) -> None:
     """
-    Persists up to 5 Gemini keys. Keeps the legacy 'gemini_api_key' field
-    in sync with the first key so older code paths keep working.
+    Persists up to 5 Gemini keys to .env (GEMINI_API_KEYS=key1,key2,...).
     Resets rotation state (fresh keys deserve a clean slate).
     """
     cleaned = []
@@ -76,11 +117,7 @@ def set_all_keys(keys: list[str]) -> None:
             cleaned.append(k)
     cleaned = cleaned[:MAX_KEYS]
 
-    cfg = _load_config()
-    cfg["gemini_api_keys"] = cleaned
-    if cleaned:
-        cfg["gemini_api_key"] = cleaned[0]
-    _save_config(cfg)
+    _write_env_keys(cleaned)
 
     with _lock:
         global _cursor

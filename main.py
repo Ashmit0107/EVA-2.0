@@ -25,6 +25,12 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+# Load secrets (Gemini API keys, etc.) from .env before anything else
+# reads them — core/gemini_keys.py also loads it defensively, but doing
+# it here first guarantees env vars are set before any other import runs.
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+
 import sounddevice as sd
 from google import genai
 from google.genai import types
