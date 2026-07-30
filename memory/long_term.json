@@ -1,8 +1,8 @@
 {
   "identity": {
     "language": {
-      "value": "Benglish",
-      "updated": "2026-07-26"
+      "value": "Bengali",
+      "updated": "2026-07-28"
     }
   },
   "preferences": {},
@@ -12,9 +12,9 @@
   "notes": {},
   "sessions": [
     {
-      "date": "2026-07-26",
-      "summary": "User Indian politics-er khobor ebong details jante cheyechilen. EVA take exam paper leak, youth protest ebong Education Minister-er resignation niye bisterito janiyeche.",
-      "language": "Benglish"
+      "date": "2026-07-30",
+      "summary": "ব্যবহারকারী এআই সহকারীকে আরও মানবিক ও বন্ধুভাবাপন্ন করে তোলার বিভিন্ন ফিচার নিয়ে আলোচনা করেছেন। পাশাপাশি তিনি অডিও ক্লিপ ব্যবহার করে এআই-এর ভয়েস পরিবর্তন করার প্রক্রিয়া ও প্রযুক্তিগত সম্ভাবনা সম্পর্কে বিস্তারিত জেনেছেন।",
+      "language": "Bengali"
     }
   ]
 }
