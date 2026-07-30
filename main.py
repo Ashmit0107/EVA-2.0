@@ -49,6 +49,7 @@ from actions.file_controller   import file_controller
 from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
+from actions.market_data       import market_data as market_data_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.system_monitor    import SystemMonitor, get_system_status
@@ -135,6 +136,25 @@ TOOL_DECLARATIONS = [
                 "aspect": {"type": "STRING", "description": "Comparison aspect: price | specs | reviews | features"},
             },
             "required": ["query"]
+        }
+    },
+    {
+        "name": "market_data",
+        "description": (
+            "Checks stock/index prices, market statistics, or discusses investment direction. "
+            "Modes: 'quote' (a specific stock/index/ticker price — default), "
+            "'stats' (broad market snapshot — major indices, sectors, sentiment), "
+            "'suggest' (educational discussion of where money is flowing / investment outlook — "
+            "never a specific buy/sell instruction, always includes a not-financial-advice disclaimer). "
+            "Use this instead of web_search for anything about stocks, markets, or investing."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {"type": "STRING", "description": "Stock/ticker/index name, or investment topic"},
+                "mode":  {"type": "STRING", "description": "quote | stats | suggest"},
+            },
+            "required": []
         }
     },
     {
@@ -594,6 +614,7 @@ TOOL_DECLARATIONS = [
                         "projects — active projects, goals, things being built | "
                         "relationships — friends, family, partner, colleagues | "
                         "wishes — future plans, things to buy, travel dreams | "
+                        "personal_context — feelings, struggles, wins, stress, ongoing personal situations (empathy layer) | "
                         "notes — habits, schedule, anything else worth remembering"
                     )
                 },
@@ -882,6 +903,16 @@ class EvaLive:
                     _query = args.get("query") or ", ".join(args.get("items", []))
                     _label = f"{_mode.upper()} — {_query[:38]}" if _query else _mode.upper()
                     self.ui.show_content(_label, r)
+
+            elif name == "market_data":
+                r = await loop.run_in_executor(None, lambda: market_data_action(parameters=args, player=self.ui))
+                result = r or "Done."
+                _mode = args.get("mode", "quote")
+                if r and not r.startswith("Market data lookup failed"):
+                    _query = args.get("query", "")
+                    _label = f"MARKET:{_mode.upper()} — {_query[:38]}" if _query else f"MARKET:{_mode.upper()}"
+                    self.ui.show_content(_label, r)
+
             elif name == "file_processor":
                 if not args.get("file_path") and self.ui.current_file:
                     args["file_path"] = self.ui.current_file

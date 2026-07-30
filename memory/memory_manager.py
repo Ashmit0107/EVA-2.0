@@ -15,16 +15,17 @@ BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
 _lock            = Lock()
 MAX_VALUE_LENGTH = 380
-MEMORY_MAX_CHARS = 2200
+MEMORY_MAX_CHARS = 2600
 
 def _empty_memory() -> dict:
     return {
-        "identity":      {},
-        "preferences":   {},
-        "projects":      {},
-        "relationships": {},
-        "wishes":        {},
-        "notes":         {},
+        "identity":        {},
+        "preferences":     {},
+        "projects":        {},
+        "relationships":   {},
+        "wishes":          {},
+        "notes":           {},
+        "personal_context": {},   # empathy layer: feelings, struggles, wins, ongoing personal situations
     }
 
 def load_memory() -> dict:
@@ -174,6 +175,15 @@ def format_memory_for_prompt(memory: dict | None) -> str:
             if val:
                 lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
 
+    personal = memory.get("personal_context", {})
+    if personal:
+        lines.append("")
+        lines.append("Personal context (use gently, with empathy — never recite back verbatim):")
+        for key, entry in list(personal.items())[:8]:
+            val = entry.get("value") if isinstance(entry, dict) else entry
+            if val:
+                lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
+
     notes = memory.get("notes", {})
     if notes:
         lines.append("")
@@ -194,7 +204,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     return result + "\n"
 
 def remember(key: str, value: str, category: str = "notes") -> str:
-    valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes"}
+    valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes", "personal_context"}
     if category not in valid:
         category = "notes"
     update_memory({category: {key: {"value": value}}})

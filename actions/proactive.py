@@ -72,7 +72,7 @@ class ProactiveEngine:
         mem_str = format_memory_for_prompt(memory) or "(no stored user data)"
 
         # Rotating context focus (cycles every trigger)
-        focus_index = self._rotation % 3
+        focus_index = self._rotation % 5
         if focus_index == 0:
             focus = (
                 "Focus on the user's active projects or goals if any are stored. "
@@ -81,12 +81,24 @@ class ProactiveEngine:
         elif focus_index == 1:
             focus = (
                 "Focus on the time of day and the user's wellbeing. "
-                "A warm check-in, a reminder to take a break, or something timely."
+                "A warm, empathetic check-in, a reminder to take a break, or something timely — "
+                "if their personal context suggests they've been stressed or under pressure, acknowledge that gently."
             )
-        else:
+        elif focus_index == 2:
             focus = (
                 "Focus on something genuinely interesting or useful — "
                 "a fact, a suggestion, or a question based on what you know about this person."
+            )
+        elif focus_index == 3:
+            focus = (
+                "Creative Collaboration: if the user has an active creative or building project, "
+                "offer one small unprompted idea, angle, or improvement for it — something they didn't ask for "
+                "but a genuine creative partner might notice."
+            )
+        else:
+            focus = (
+                "Personalized Learning: if the user is learning something or working in unfamiliar territory, "
+                "surface one bite-sized, relevant tip or resource pitched at their actual skill level."
             )
 
         # Optional: monitored topics context

@@ -21,9 +21,14 @@ It's not just an assistant — it's an extension of your digital life.
 | 🧩 Autonomous Tasks | High-level planning for complex multi-step goals via agent mode |
 | 👁️ Visual Awareness | Real-time screen capture and webcam vision piped into your main Gemini session |
 | 🧠 Persistent Memory | Deeply remembers projects, preferences, and personal context across sessions |
+| 💛 Empathetic Memory | Remembers feelings, struggles, and wins — checks in on them naturally later, never recites them back |
+| 💬 Natural Communication | Flexible, human conversational register — matches the user's tone instead of a fixed assistant cadence |
+| 🎨 Creative Collaboration | Acts as a real creative partner when brainstorming or building — offers unprompted angles and ideas |
+| 🎓 Personalized Learning | Adapts explanations to the user's known background and skill level instead of generic depth |
+| 📈 Market Analysis | Stock/index price checks, broad market statistics, and educational investment-direction discussion (always with a not-financial-advice disclaimer) |
 | ⌨️ Hybrid Input | Seamlessly switch between keyboard typing and voice commands |
 | 🌅 Morning Briefing | On first boot: greets you, reads the time, recaps yesterday, and fetches live news |
-| 🔔 Proactive 2.0 | Time-aware, context-aware check-ins — knows the time of day, your projects, and what you've been discussing |
+| 🔔 Proactive 2.1 | Time-aware, context-aware check-ins — rotates across projects, wellbeing, interesting facts, creative collaboration, and personalized learning |
 | 🗓️ Session Memory | Summarises each conversation and mentions it naturally next morning — consumed after use, never repeats |
 | 👁️‍🗨️ Background Monitoring | User-configured topic watching — checks for new headlines once a day and alerts naturally |
 | 📊 Hardware Monitoring | Continuous CPU, RAM, GPU and temperature telemetry with localized voice alerts |
@@ -62,13 +67,19 @@ Tell EVA to monitor any topic and it checks for new developments once a day usin
 
 Fully opt-in — EVA monitors nothing without being explicitly asked. Crypto, financial, and trading topics are blocked at the code level regardless of what is requested. Same headline never triggers twice.
 
-### 🔔 Proactive System 2.0 — Context-Aware, Time-Aware, Non-Repetitive
+### 📈 Market Analysis — Stocks, Indices, and Investment Direction On Demand
+EVA can now check a stock or index price, pull a broad market snapshot (major indices, sectors, sentiment), or discuss investment direction in educational terms. This is a separate, explicit, on-demand tool from Background Monitoring — it never runs passively, and every 'suggest' response ends with a plain not-financial-advice disclaimer.
+
+### 💛 Empathy & Natural Communication
+EVA now notices tone as well as words, treats personal shares (a struggle, a goal, a win) as worth remembering rather than just answering, and talks in a more natural, flexible register instead of a fixed assistant cadence. Proactive check-ins gained two more focus areas — Creative Collaboration and Personalized Learning — so EVA can offer an unprompted idea on your projects or a well-pitched tip while you're learning something new.
+
+### 🔔 Proactive System 2.1 — Context-Aware, Time-Aware, Non-Repetitive
 The proactive engine was rebuilt from the ground up. Instead of a generic check-in after 15 minutes of silence, EVA now:
 - Knows the **time of day** — morning tone differs from evening tone
 - Knows your **active projects** from memory and can ask how something is going
 - Knows your **monitored topics** and can bring one up naturally
 - Knows **what you were just talking about** (last 8 conversation turns)
-- **Rotates** between three focus areas so it never opens with the same line twice
+- **Rotates** between five focus areas — projects, wellbeing, interesting facts, Creative Collaboration, and Personalized Learning — so it never opens with the same line twice
 - Has a 20-minute cooldown (up from 10) — less intrusive, more meaningful
 
 ### 👁️ Instant Vision Acknowledgment — No More Silent Waiting
@@ -88,6 +99,7 @@ EVA
 ├── setup.py                  # First-run configuration wizard
 ├── actions/
 │   ├── web_search.py         # Gemini + DDG parallel search (news, research, price, compare)
+│   ├── market_data.py        # Stock/index price checks, market statistics, investment-direction discussion
 │   ├── screen_processor.py   # Screen capture & webcam vision via Gemini Live
 │   ├── background_monitor.py # User-configured topic watching — daily DDG check, no crypto
 │   ├── proactive.py          # Proactive 2.0 — time/context/rotation-aware check-ins

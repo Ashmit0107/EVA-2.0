@@ -338,6 +338,102 @@ class _SysMetrics:
 
 _metrics = _SysMetrics()
 
+
+# ── Live stock data (yfinance — no API key required) ─────────────────────────
+try:
+    import yfinance as _yf
+    _YF_OK = True
+except Exception:
+    _yf = None
+    _YF_OK = False
+
+WATCHLIST = ["AAPL", "MSFT", "GOOGL", "NVDA"]
+TICKER_NAMES = {
+    "AAPL": "Apple", "MSFT": "Microsoft",
+    "GOOGL": "Alphabet (Google)", "NVDA": "Nvidia",
+}
+_STOCK_REFRESH_SECS = 60
+
+
+class _StockFeed:
+    """Background thread pulling REAL quotes/history for WATCHLIST via yfinance.
+    Mirrors the _SysMetrics zero-blocking pattern — UI reads snapshot(), never
+    touches the network directly."""
+
+    def __init__(self, tickers: list[str]):
+        self.tickers = tickers
+        self._lock    = threading.Lock()
+        self._daily:    dict[str, list[float]] = {}
+        self._intraday: dict[str, list[float]] = {}
+        self._price:    dict[str, float] = {}
+        self._pct:      dict[str, float] = {}
+        self._score:    dict[str, float] = {}
+        self._trend:    dict[str, str]   = {}
+        self._ok           = False
+        self._last_error   = "" if _YF_OK else "yfinance not installed"
+        self._last_update  = 0.0
+        self._running = True
+        threading.Thread(target=self._loop, daemon=True, name="stock-feed").start()
+
+    def _loop(self):
+        while self._running:
+            try:
+                if not _YF_OK:
+                    raise RuntimeError("yfinance not installed — run: pip install yfinance")
+                self._update()
+                self._ok = True
+                self._last_error = ""
+                self._last_update = time.time()
+            except Exception as e:
+                self._ok = False
+                self._last_error = str(e)
+                print(f"[StockFeed] fetch failed: {e}")
+            time.sleep(_STOCK_REFRESH_SECS if _YF_OK else 20)
+
+    def _update(self):
+        for t in self.tickers:
+            try:
+                tk      = _yf.Ticker(t)
+                daily   = tk.history(period="1y", interval="1d")
+                intra   = tk.history(period="1d", interval="5m")
+            except Exception:
+                continue
+            if daily.empty:
+                continue
+            closes = [float(x) for x in daily["Close"].tolist()]
+            intraday_closes = (
+                [float(x) for x in intra["Close"].tolist()] if not intra.empty else closes[-1:]
+            )
+            last = closes[-1]
+            prev = closes[-2] if len(closes) > 1 else last
+            ma20 = sum(closes[-20:]) / min(20, len(closes))
+            score = max(5.0, min(95.0, 50 + (last - ma20) / ma20 * 500)) if ma20 else 50.0
+            with self._lock:
+                self._daily[t]    = closes
+                self._intraday[t] = intraday_closes
+                self._price[t]    = last
+                self._pct[t]      = (last - prev) / prev * 100 if prev else 0.0
+                self._score[t]    = score
+                self._trend[t]    = "up" if last >= ma20 else "down"
+
+    def snapshot(self, ticker: str) -> dict:
+        with self._lock:
+            return {
+                "daily":    list(self._daily.get(ticker, [])),
+                "intraday": list(self._intraday.get(ticker, [])),
+                "price":    self._price.get(ticker, 0.0),
+                "pct":      self._pct.get(ticker, 0.0),
+                "score":    self._score.get(ticker, 50.0),
+                "trend":    self._trend.get(ticker, "mixed"),
+            }
+
+    def status(self) -> dict:
+        with self._lock:
+            return {"ok": self._ok, "error": self._last_error, "last_update": self._last_update}
+
+
+_stock_feed = _StockFeed(WATCHLIST)
+
 class HudCanvas(QWidget):
     def __init__(self, face_path: str, assistant_name: str = "EVA", parent=None):
         super().__init__(parent)
@@ -1835,6 +1931,432 @@ class RemindersPanel(QWidget):
             self._list_lay.insertWidget(idx, row)
 
 
+class StockChartCanvas(QWidget):
+    """Custom-painted stock line chart with actual + predicted segments,
+    volume bars, and a light grid — matches the EVA HUD theme."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(120)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._prices: list[float] = []
+        self._pred:   list[float] = []
+        self._vols:   list[float] = []
+        self._range   = "1W"
+        self._regenerate()
+
+    def set_range(self, rng: str):
+        self._range = rng
+        self._regenerate()
+        self.update()
+
+    def _regenerate(self):
+        n = {"1D": 24, "1W": 14, "1M": 30, "1Y": 24}.get(self._range, 14)
+        base = random.uniform(60, 260)
+        vals = [base]
+        for _ in range(n - 1):
+            vals.append(max(1.0, vals[-1] + random.uniform(-1, 1) * base * 0.03))
+        self._prices = vals
+        last = vals[-1]
+        self._pred = [last]
+        for _ in range(4):
+            self._pred.append(max(1.0, self._pred[-1] + random.uniform(-0.6, 1.1) * base * 0.02))
+        self._vols = [random.uniform(0.2, 1.0) for _ in vals]
+
+    def nudge_live(self):
+        """Small live-feeling update to the last point + predicted tail."""
+        if not self._prices:
+            return
+        last = self._prices[-1]
+        self._prices[-1] = max(1.0, last + random.uniform(-1, 1) * last * 0.006)
+        last = self._prices[-1]
+        self._pred = [last]
+        for _ in range(4):
+            self._pred.append(max(1.0, self._pred[-1] + random.uniform(-0.6, 1.1) * last * 0.02))
+        self.update()
+
+    def latest_pct(self) -> float:
+        if len(self._prices) < 2 or self._prices[0] == 0:
+            return 0.0
+        return (self._prices[-1] - self._prices[0]) / self._prices[0] * 100
+
+    def load_series(self, closes: list[float]):
+        """Load REAL price history and derive a short-term projection via
+        simple linear regression on the recent window (no randomness)."""
+        if not closes:
+            return
+        vals = [float(v) for v in closes if v is not None]
+        if not vals:
+            return
+        self._prices = vals[-60:] if len(vals) > 60 else vals
+        n = len(self._prices)
+        if n >= 2:
+            xs = list(range(n))
+            mean_x = sum(xs) / n
+            mean_y = sum(self._prices) / n
+            den = sum((x - mean_x) ** 2 for x in xs) or 1.0
+            num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, self._prices))
+            slope = num / den
+            last = self._prices[-1]
+            self._pred = [last] + [max(0.01, last + slope * (i + 1)) for i in range(4)]
+        else:
+            self._pred = list(self._prices) * 5
+        rng = max(self._prices) - min(self._prices) or 1.0
+        self._vols = [abs(self._prices[i] - self._prices[i - 1]) / rng if i > 0 else 0.3
+                      for i in range(n)]
+        self.update()
+
+    def latest_price(self) -> float:
+        return self._prices[-1] if self._prices else 0.0
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+        p.fillRect(self.rect(), qcol(C.PANEL))
+
+        if not self._prices:
+            return
+
+        pad_l, pad_r, pad_t, pad_b = 6, 6, 8, 22
+        vol_h = 18
+        plot_top = pad_t
+        plot_bot = H - pad_b - vol_h
+        plot_h   = max(10, plot_bot - plot_top)
+        plot_w   = max(10, W - pad_l - pad_r)
+
+        all_vals = self._prices + self._pred
+        vmin, vmax = min(all_vals), max(all_vals)
+        if vmax - vmin < 1e-6:
+            vmax = vmin + 1.0
+
+        p.setPen(QPen(qcol(C.BORDER), 1))
+        for i in range(3):
+            gy = plot_top + plot_h * i / 2
+            p.drawLine(QPointF(pad_l, gy), QPointF(W - pad_r, gy))
+
+        n_total = len(self._prices) + len(self._pred) - 1
+        step = plot_w / max(1, n_total)
+
+        def _y(v: float) -> float:
+            return plot_top + plot_h - (v - vmin) / (vmax - vmin) * plot_h
+
+        vmax_v = max(self._vols) if self._vols else 1.0
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(qcol(C.BORDER_A)))
+        for i, v in enumerate(self._vols):
+            bx = pad_l + i * step - 2
+            bh = (v / vmax_v) * (vol_h - 2)
+            p.drawRect(QRectF(bx, H - pad_b - bh, max(2, step - 3), bh))
+
+        pts = [QPointF(pad_l + i * step, _y(v)) for i, v in enumerate(self._prices)]
+        p.setPen(QPen(qcol(C.PRI), 2))
+        for i in range(len(pts) - 1):
+            p.drawLine(pts[i], pts[i + 1])
+        if pts:
+            p.setBrush(QBrush(qcol(C.PRI)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(pts[-1], 3, 3)
+
+        start_i = len(self._prices) - 1
+        pred_pts = [QPointF(pad_l + (start_i + j) * step, _y(v)) for j, v in enumerate(self._pred)]
+        pen = QPen(qcol(C.ACC, 220), 1.6, Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        for i in range(len(pred_pts) - 1):
+            p.drawLine(pred_pts[i], pred_pts[i + 1])
+
+        pct = self.latest_pct()
+        col = C.GREEN if pct >= 0 else C.RED
+        p.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        p.setPen(QPen(qcol(col), 1))
+        p.drawText(QRectF(0, 0, W - 6, 14), Qt.AlignmentFlag.AlignRight,
+                   f"{'+' if pct >= 0 else ''}{pct:.2f}%  ${self.latest_price():.2f}")
+
+
+class IncubationPanel(QWidget):
+    """Incubation / Business Ideas screen — live-look stock chart,
+    plain-language 'invest signals', and a marketing playbook. All figures
+    are illustrative sample data, not real financial advice."""
+
+    _PLAYBOOK = [
+        ("🎬", "Short-form video",   "Quick, catchy videos on TikTok/Reels/Shorts — hook people in the first 2 seconds."),
+        ("🤝", "Influencer / UGC",   "Get real people, even small creators, to genuinely try and talk about your product."),
+        ("💬", "Community-led growth", "Build a Discord/forum where users help each other and spread the word for you."),
+        ("🔍", "SEO / content",       "Write helpful articles that answer questions people search for on Google."),
+        ("🔁", "Retention marketing",  "Keep the customers you already have coming back with emails and offers."),
+        ("🤖", "AI-powered ads",       "Use AI to quickly make and test many ad versions to find what works best."),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(f"background: {C.BG};")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 12, 14, 12)
+        outer.setSpacing(10)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ background: {C.BG}; width: 7px; border: none; }}
+            QScrollBar::handle:vertical {{ background: {C.BORDER_B}; border-radius: 3px; min-height: 20px; }}
+        """)
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(0, 0, 4, 0)
+        lay.setSpacing(10)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+
+        def _card() -> tuple[QWidget, QVBoxLayout]:
+            c = QWidget()
+            c.setStyleSheet(
+                f"background: {C.PANEL2}; border: 1px solid {C.BORDER}; border-radius: 8px;"
+            )
+            cl = QVBoxLayout(c)
+            cl.setContentsMargins(12, 10, 12, 10)
+            cl.setSpacing(6)
+            return c, cl
+
+        def _hdr(txt: str, sub: str = "") -> QVBoxLayout:
+            v = QVBoxLayout(); v.setSpacing(1)
+            t = QLabel(txt)
+            t.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+            t.setStyleSheet(f"color: {C.PRI}; background: transparent; letter-spacing: 1px;")
+            v.addWidget(t)
+            if sub:
+                s = QLabel(sub)
+                s.setFont(QFont("Courier New", 7))
+                s.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+                s.setWordWrap(True)
+                v.addWidget(s)
+            return v
+
+        title_row = QHBoxLayout()
+        title_row.addLayout(_hdr("◈ INCUBATION — BUSINESS IDEAS",
+                                  "A simple space to track markets and get startup marketing tips."))
+        title_row.addStretch()
+        self._status_lbl = QLabel("●  LIVE")
+        self._status_lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self._status_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+        title_row.addWidget(self._status_lbl)
+        lay.addLayout(title_row)
+
+        ticker_row = QHBoxLayout(); ticker_row.setSpacing(6)
+        self._ticker = WATCHLIST[0]
+        self._ticker_btns: dict[str, QPushButton] = {}
+        for tkr in WATCHLIST:
+            b = QPushButton(tkr)
+            b.setFixedHeight(24)
+            b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _, t=tkr: self._select_ticker(t))
+            ticker_row.addWidget(b)
+            self._ticker_btns[tkr] = b
+        ticker_row.addStretch()
+        lay.addLayout(ticker_row)
+
+        chart_card, chart_lay = _card()
+        self._chart_title_lbl = QLabel("📈 STOCK PRICE OVER TIME — " + self._ticker)
+        self._chart_title_lbl.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        self._chart_title_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent; letter-spacing: 1px;")
+        chart_lay.addWidget(self._chart_title_lbl)
+        chart_sub = QLabel("Cyan = actual price. Orange dashed = short-term trend projection from real data.")
+        chart_sub.setFont(QFont("Courier New", 7))
+        chart_sub.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        chart_sub.setWordWrap(True)
+        chart_lay.addWidget(chart_sub)
+        self._chart = StockChartCanvas()
+        self._chart.setFixedHeight(120)
+        chart_lay.addWidget(self._chart)
+
+        range_row = QHBoxLayout(); range_row.setSpacing(6)
+        self._range_btns: dict[str, QPushButton] = {}
+        for rng in ("1D", "1W", "1M", "1Y"):
+            b = QPushButton(rng)
+            b.setFixedSize(44, 22)
+            b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _, r=rng: self._set_range(r))
+            range_row.addWidget(b)
+            self._range_btns[rng] = b
+        range_row.addStretch()
+        hint = QLabel("tap a range to zoom in/out")
+        hint.setFont(QFont("Courier New", 7))
+        hint.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        range_row.addWidget(hint)
+        chart_lay.addLayout(range_row)
+        self._range = "1W"
+        lay.addWidget(chart_card)
+
+        sig_card, sig_lay = _card()
+        sig_lay.addLayout(_hdr("💡 WHERE MIGHT BE WORTH INVESTING",
+                                "\"Confidence\" = a simple momentum score computed from real recent price data. Not a guarantee — always do your own research."))
+        self._sig_rows: dict[str, QLabel] = {}
+        for ticker in WATCHLIST:
+            name = TICKER_NAMES.get(ticker, ticker)
+            row = QWidget()
+            row.setStyleSheet(
+                f"background: {C.PANEL}; border: 1px solid {C.BORDER_A}; border-radius: 6px;"
+            )
+            rl = QHBoxLayout(row); rl.setContentsMargins(9, 6, 9, 6)
+            lab = QLabel(f"{ticker}   ")
+            lab.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+            lab.setStyleSheet(f"color: {C.WHITE}; background: transparent;")
+            rl.addWidget(lab)
+            sub = QLabel(f"— {name}")
+            sub.setFont(QFont("Courier New", 7))
+            sub.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            rl.addWidget(sub)
+            rl.addStretch()
+            vlab = QLabel("loading…")
+            vlab.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            vlab.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            rl.addWidget(vlab)
+            self._sig_rows[ticker] = vlab
+            sig_lay.addWidget(row)
+        warn = QLabel("⚠ Real prices, illustrative scoring — not real financial advice. Always double-check before investing.")
+        warn.setFont(QFont("Courier New", 7))
+        warn.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+        warn.setWordWrap(True)
+        sig_lay.addWidget(warn)
+        lay.addWidget(sig_card)
+
+        mkt_card, mkt_lay = _card()
+        mkt_lay.addLayout(_hdr("📣 HOW TO MARKET YOUR BUSINESS IDEA",
+                                "Approaches that are working well for new businesses right now."))
+        from PyQt6.QtWidgets import QGridLayout
+        grid = QGridLayout(); grid.setSpacing(6)
+        for idx, (icon, name, desc) in enumerate(self._PLAYBOOK):
+            cell = QWidget()
+            cell.setStyleSheet(
+                f"background: {C.PANEL}; border: 1px solid {C.BORDER_A}; border-radius: 6px;"
+            )
+            cv = QVBoxLayout(cell)
+            cv.setContentsMargins(9, 7, 9, 7)
+            cv.setSpacing(2)
+            t = QLabel(f"{icon}  {name}")
+            t.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            t.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+            cv.addWidget(t)
+            d = QLabel(desc)
+            d.setFont(QFont("Courier New", 7))
+            d.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            d.setWordWrap(True)
+            cv.addWidget(d)
+            grid.addWidget(cell, idx // 2, idx % 2)
+        mkt_lay.addLayout(grid)
+        lay.addWidget(mkt_card)
+
+        lay.addStretch()
+
+        self._style_ticker_btns()
+        self._set_range("1W", refresh=False)
+        self._refresh_all()
+
+        self._live_tmr = QTimer(self)
+        self._live_tmr.timeout.connect(self._refresh_all)
+        self._live_tmr.start(5000)
+
+    # ── ticker / range selection ─────────────────────────────────────────
+    def _style_ticker_btns(self):
+        for t, b in self._ticker_btns.items():
+            if t == self._ticker:
+                b.setStyleSheet(f"""
+                    QPushButton {{ background: {C.PRI}; color: {C.DARK};
+                        border: none; border-radius: 4px; }}
+                """)
+            else:
+                b.setStyleSheet(f"""
+                    QPushButton {{ background: {C.PANEL}; color: {C.TEXT};
+                        border: 1px solid {C.BORDER_A}; border-radius: 4px; }}
+                    QPushButton:hover {{ border-color: {C.PRI_DIM}; }}
+                """)
+
+    def _select_ticker(self, ticker: str):
+        if ticker not in WATCHLIST:
+            return
+        self._ticker = ticker
+        self._style_ticker_btns()
+        self._chart_title_lbl.setText("📈 STOCK PRICE OVER TIME — " + self._ticker)
+        self._refresh_chart()
+
+    def _set_range(self, rng: str, refresh: bool = True):
+        self._range = rng
+        for r, b in self._range_btns.items():
+            if r == rng:
+                b.setStyleSheet(f"""
+                    QPushButton {{ background: {C.PRI}; color: {C.DARK};
+                        border: none; border-radius: 4px; }}
+                """)
+            else:
+                b.setStyleSheet(f"""
+                    QPushButton {{ background: {C.PANEL}; color: {C.TEXT};
+                        border: 1px solid {C.BORDER_A}; border-radius: 4px; }}
+                    QPushButton:hover {{ border-color: {C.PRI_DIM}; }}
+                """)
+        if refresh:
+            self._refresh_chart()
+
+    # ── real-data refresh (reads cached _StockFeed snapshots — never blocks) ──
+    def _slice_for_range(self, snap: dict) -> list[float]:
+        daily = snap.get("daily") or []
+        intraday = snap.get("intraday") or []
+        rng = self._range
+        if rng == "1D":
+            return intraday if intraday else daily[-1:]
+        if rng == "1W":
+            return daily[-7:] if daily else []
+        if rng == "1M":
+            return daily[-22:] if daily else []
+        return daily  # 1Y — full cached daily history
+
+    def _refresh_chart(self):
+        snap = _stock_feed.snapshot(self._ticker)
+        series = self._slice_for_range(snap)
+        if series:
+            self._chart.load_series(series)
+
+    def _refresh_signals(self):
+        for ticker, lab in self._sig_rows.items():
+            snap = _stock_feed.snapshot(ticker)
+            price = snap.get("price", 0.0)
+            if not price:
+                lab.setText("loading…")
+                lab.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+                continue
+            score = snap.get("score", 50.0)
+            trend = snap.get("trend", "mixed")
+            pct   = snap.get("pct", 0.0)
+            if trend == "up" and score >= 60:
+                verdict, col = "Promising", C.GREEN
+            elif trend == "down" and score <= 40:
+                verdict, col = "Risky", C.RED
+            else:
+                verdict, col = "Mixed", C.ACC2
+            lab.setText(f"{verdict}  ·  {score:.0f}%  ·  ${price:.2f}  ({'+' if pct >= 0 else ''}{pct:.2f}%)")
+            lab.setStyleSheet(f"color: {col}; background: transparent; font-weight: bold;")
+
+    def _refresh_status(self):
+        status = _stock_feed.status()
+        if status.get("ok"):
+            self._status_lbl.setText("●  LIVE")
+            self._status_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+        else:
+            err = (status.get("error") or "").strip()
+            suffix = f"  ({err[:60]})" if err else ""
+            self._status_lbl.setText(f"●  OFFLINE — showing last-known data{suffix}")
+            self._status_lbl.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+
+    def _refresh_all(self):
+        self._refresh_chart()
+        self._refresh_signals()
+        self._refresh_status()
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -1859,7 +2381,7 @@ class MainWindow(QMainWindow):
         if _ui_color and _ui_color.lower() != DEFAULT_UI_COLOR:
             apply_ui_accent(_ui_color)
 
-        self.setWindowTitle(f"{_display} — v1.0")
+        self.setWindowTitle(f"{_display} — 2.0")
         self.setMinimumSize(_MIN_W, _MIN_H)
         self.resize(_DEFAULT_W, _DEFAULT_H)
 
@@ -1932,10 +2454,12 @@ class MainWindow(QMainWindow):
         )
         _cam_v.addWidget(self._cam_live_lbl, stretch=1)
 
-        # Stack: 0 = animated HUD, 1 = live camera
+        # Stack: 0 = animated HUD, 1 = live camera, 2 = incubation / business ideas
+        self._incubation_panel = IncubationPanel()
         self._hud_cam_stack = QStackedWidget()
         self._hud_cam_stack.addWidget(self.hud)
         self._hud_cam_stack.addWidget(_cam_cont)
+        self._hud_cam_stack.addWidget(self._incubation_panel)
 
         self._center_split = QSplitter(Qt.Orientation.Vertical)
         self._center_split.setStyleSheet(f"""
@@ -2433,6 +2957,35 @@ class MainWindow(QMainWindow):
         else:
             self.showFullScreen()
 
+    def _toggle_incubation(self):
+        """Switch the center HUD area to/from the Incubation (business ideas) panel."""
+        showing = self._hud_cam_stack.currentIndex() == 2
+        if showing:
+            self._hud_cam_stack.setCurrentIndex(0)
+            self._incubate_btn.setChecked(False)
+            self._style_incubate_btn(False)
+        else:
+            self._hud_cam_stack.setCurrentIndex(2)
+            self._incubate_btn.setChecked(True)
+            self._style_incubate_btn(True)
+
+    def _style_incubate_btn(self, active: bool):
+        if active:
+            self._incubate_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {C.PRI_GHO}; color: {C.PRI};
+                    border: 1px solid {C.PRI}; border-radius: 4px; text-align: left; padding: 0 6px;
+                }}
+            """)
+        else:
+            self._incubate_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {C.PANEL2}; color: {C.TEXT_MED};
+                    border: 1px solid {C.BORDER_A}; border-radius: 4px; text-align: left; padding: 0 6px;
+                }}
+                QPushButton:hover {{ color: {C.PRI}; border-color: {C.PRI_DIM}; }}
+            """)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         cw = self.centralWidget()
@@ -2536,7 +3089,7 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_badge("EVA v1.0", C.PRI_DIM))
+        lay.addWidget(_badge("EVA 2.0", C.PRI_DIM))
         lay.addSpacing(8)
         self._drawer_btn = QPushButton("⚙")
         self._drawer_btn.setFixedSize(26, 26)
@@ -2648,6 +3201,17 @@ class MainWindow(QMainWindow):
 
         self._reminders_panel = RemindersPanel()
         lay.addWidget(self._reminders_panel)
+        lay.addSpacing(4)
+
+        self._incubate_btn = QPushButton("💡  INCUBATION")
+        self._incubate_btn.setFixedHeight(28)
+        self._incubate_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self._incubate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._incubate_btn.setCheckable(True)
+        self._incubate_btn.setToolTip("Business ideas — stock chart, invest signals, marketing tips")
+        self._incubate_btn.clicked.connect(self._toggle_incubation)
+        self._style_incubate_btn(False)
+        lay.addWidget(self._incubate_btn)
         lay.addSpacing(4)
 
         lay.addStretch()
@@ -2870,6 +3434,37 @@ class MainWindow(QMainWindow):
         self._autostart_btn.clicked.connect(self._toggle_autostart)
         lay.addWidget(self._autostart_btn)
 
+        mkt_hdr = QLabel("▸ MARKET")
+        mkt_hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        mkt_hdr.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; "
+                             f"border-bottom: 1px solid {C.BORDER}; padding-bottom: 2px; margin-top: 2px;")
+        lay.addWidget(mkt_hdr)
+
+        quote_btn = QPushButton("💰  STOCK / INDEX QUOTE")
+        quote_btn.setFixedHeight(26)
+        quote_btn.setFont(QFont("Courier New", 7))
+        quote_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        quote_btn.setStyleSheet(_BTN_STYLE_DIM)
+        quote_btn.setToolTip("Pre-fills the command box — type a ticker and press Enter")
+        quote_btn.clicked.connect(lambda: self._quick_prefill("Check the price of "))
+        lay.addWidget(quote_btn)
+
+        stats_btn = QPushButton("📈  MARKET STATS")
+        stats_btn.setFixedHeight(26)
+        stats_btn.setFont(QFont("Courier New", 7))
+        stats_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        stats_btn.setStyleSheet(_BTN_STYLE_DIM)
+        stats_btn.clicked.connect(lambda: self._send_quick("What are today's overall market statistics?"))
+        lay.addWidget(stats_btn)
+
+        invest_btn = QPushButton("💡  INVESTMENT IDEAS")
+        invest_btn.setFixedHeight(26)
+        invest_btn.setFont(QFont("Courier New", 7))
+        invest_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        invest_btn.setStyleSheet(_BTN_STYLE_DIM)
+        invest_btn.clicked.connect(lambda: self._send_quick("Give me an educational overview of where investors are looking right now."))
+        lay.addWidget(invest_btn)
+
         cust_btn = QPushButton("⚙  CUSTOMISE ASSISTANT")
         cust_btn.setFixedHeight(26)
         cust_btn.setFont(QFont("Courier New", 7))
@@ -3061,7 +3656,7 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(_fl("[F4] Mute  ·  [F11] Fullscreen"))
         lay.addStretch()
-        lay.addWidget(_fl("By FatihMakes", C.PRI_DIM))
+        lay.addWidget(_fl("By A.Paul", C.PRI_DIM))
         return w
 
     def _on_file_selected(self, path: str):
@@ -3305,7 +3900,7 @@ class MainWindow(QMainWindow):
         """Update all name/theme-dependent UI elements and persist to config."""
         self._assistant_name = name.strip() or "EVA"
         display = self._assistant_name.upper()
-        self.setWindowTitle(f"{display} — v1.0")
+        self.setWindowTitle(f"{display} — 2.0")
         self._title_lbl.setText(display)
         if display in ("JARVIS", "J.A.R.V.I.S"):
             self._sub_lbl.setText("Just A Rather Very Intelligent System")
@@ -3405,6 +4000,24 @@ class MainWindow(QMainWindow):
         self._log.append_log(f"You: {txt}")
         if self.on_text_command:
             threading.Thread(target=self.on_text_command, args=(txt,), daemon=True).start()
+
+    def _send_quick(self, txt: str):
+        """Fire a preset command the same way the manual input box does (used by quick-drawer buttons)."""
+        self._log.append_log(f"You: {txt}")
+        if self.on_text_command:
+            threading.Thread(target=self.on_text_command, args=(txt,), daemon=True).start()
+        if self._drawer_btn.isChecked():
+            self._drawer_btn.setChecked(False)
+            self._quick_drawer.hide()
+
+    def _quick_prefill(self, txt: str):
+        """Pre-fill the command box (for actions that need more input, e.g. a ticker) and focus it."""
+        self._input.setText(txt)
+        self._input.setFocus()
+        self._input.setCursorPosition(len(txt))
+        if self._drawer_btn.isChecked():
+            self._drawer_btn.setChecked(False)
+            self._quick_drawer.hide()
 
     def _apply_state(self, state: str):
         self.hud.state    = state
