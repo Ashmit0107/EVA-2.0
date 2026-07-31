@@ -86,3 +86,26 @@ def save_brief_enabled(enabled: bool) -> None:
             data = {}
     data["morning_brief_enabled"] = enabled
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+
+def get_voice_sample_path() -> str:
+    """Return the path to the recorded voice-clone sample, or '' if none saved yet."""
+    return load_api_keys().get("voice_sample_path", "") or ""
+
+
+def save_voice_clone_config(sample_path: str, engine: str = "xtts_clone") -> None:
+    """Persist the recorded voice sample's path, switch the active TTS engine
+    to the clone engine that consumes it, and flip voice_mode to 'cloned' —
+    main.py's EvaLive._build_config() gates cloned-voice synthesis on this
+    exact key, so without it the saved sample is stored but never used."""
+    ensure_config_dir()
+    data: dict = {}
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data["voice_sample_path"] = str(sample_path).strip()
+    data["tts_engine"] = engine
+    data["voice_mode"] = "cloned"
+    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")

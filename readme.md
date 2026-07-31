@@ -133,7 +133,7 @@ EVA
 │   └── static/               # Dashboard web UI assets
 └── config/
     ├── api_keys.json         # Non-secret settings: OS, assistant name, user name, voice_mode, tone
-    └── voice_samples/        # (planned) user's uploaded/recorded voice-clone reference clip
+    └── voice_samples/        # (planned) user's uploaded voice-clone reference clip
 ```
 
 ---
@@ -142,7 +142,7 @@ EVA
 
 EVA can speak in a voice you provide instead of the default Gemini voice.
 
-- Upload or record a 6–30 second clean audio clip from the Settings panel.
+- Upload a 6–30 second clean audio clip from the Settings panel ("Clone my voice").
 - EVA uses **Coqui XTTS-v2** running locally on your machine — no per-use cost, no data leaves your PC.
 - The **first time** you switch to cloned voice mode, XTTS-v2 downloads its model (~2GB) and asks you to accept Coqui's non-commercial license once, in the terminal.
 - A **native/cloned toggle** lets you switch back to Gemini's built-in voice at any time — cloning never replaces the default, it sits alongside it.

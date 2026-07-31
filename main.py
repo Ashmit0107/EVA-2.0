@@ -16,6 +16,7 @@ if _platform.system() == "Windows":
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
+import concurrent.futures
 import re
 import threading
 import time
@@ -79,7 +80,11 @@ def get_base_dir():
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
-LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+# Live API TEXT-capable models (gemini-2.0-flash-live-001, gemini-live-2.5-flash-preview) were
+# shut down Dec 9 2025. The only current Live model is native-audio-only, so BOTH voice modes
+# must connect with response_modalities=["AUDIO"]. Cloned mode discards the native audio and
+# uses the output_audio_transcription text instead (see _receive_audio / _build_config).
+LIVE_MODEL           = "models/gemini-3.1-flash-live-preview"
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
@@ -674,6 +679,17 @@ class EvaLive:
         self._tts_player: TTSPlayer | None = None
         self._tts_cfg_key      = None       # snapshot of (engine, sample_path, speed) used to build _tts_player
         self._cloned_speaking  = False      # True while local TTS is synthesizing/playing
+        # Dedicated executor for TTS work — NEVER use asyncio's shared default
+        # executor here. If anything else in the app (e.g. a Gemini key-quota
+        # rotation that tears down and rebuilds the session's TaskGroup) ever
+        # leaves the loop's default executor in a bad state, run_in_executor(None, ...)
+        # starts raising "cannot schedule new futures after shutdown" for every
+        # submission — which silently kills BOTH the cloned-voice attempt AND its
+        # EdgeTTS fallback in _speak_cloned, leaving the user with total silence.
+        # A small isolated pool that only TTS ever touches can't be affected by that.
+        self._tts_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="eva-tts"
+        )
 
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
@@ -692,10 +708,7 @@ class EvaLive:
         if not self._loop or not self.session:
             return
         asyncio.run_coroutine_threadsafe(
-            self.session.send_client_content(
-                turns={"parts": [{"text": text}]},
-                turn_complete=True
-            ),
+            self.session.send_realtime_input(text=text),
             self._loop
         )
 
@@ -736,10 +749,7 @@ class EvaLive:
         if not self._loop or not self.session:
             return
         asyncio.run_coroutine_threadsafe(
-            self.session.send_client_content(
-                turns={"parts": [{"text": text}]},
-                turn_complete=True
-            ),
+            self.session.send_realtime_input(text=text),
             self._loop
         )
 
@@ -747,6 +757,18 @@ class EvaLive:
         short = str(error)[:120]
         self.ui.write_log(f"ERR: {tool_name} — {short}")
         self.speak(f"Sir, {tool_name} encountered an error. {short}")
+
+    async def _send_text(self, text: str) -> None:
+        """Send text into the live session mid-conversation.
+
+        gemini-3.1-flash-live-preview (and later Live models) only allow
+        send_client_content() to seed INITIAL context history — every other use now
+        fails the whole connection with 1007 'Request contains an invalid argument'.
+        All new text after the session has started must go through
+        send_realtime_input(text=...) instead.
+        """
+        if self.session:
+            await self.session.send_realtime_input(text=text)
 
     async def _speak_cloned(self, text: str) -> None:
         """Synthesize+play a completed turn's text via the local XTTS-v2 TTSPlayer
@@ -759,7 +781,7 @@ class EvaLive:
         self._cloned_speaking = True
         self.set_speaking(True)
         try:
-            await loop.run_in_executor(None, self._tts_player.speak, text)
+            await loop.run_in_executor(self._tts_executor, self._tts_player.speak, text)
         except Exception as e:
             # Missing model (still downloading), bad sample, or a transient synthesis
             # error — don't leave the user without any audio for this turn. Fall back
@@ -770,7 +792,7 @@ class EvaLive:
             self.ui.write_log(f"ERR: Cloned voice — {str(e)[:120]} (using fallback voice for this reply)")
             try:
                 from core.tts import EdgeTTSEngine
-                await loop.run_in_executor(None, EdgeTTSEngine().speak, text)
+                await loop.run_in_executor(self._tts_executor, EdgeTTSEngine().speak, text)
             except Exception as fallback_err:
                 print(f"[EVA] ⚠️ Fallback voice also failed: {fallback_err}")
                 self.ui.write_log(f"ERR: Fallback voice failed too — {str(fallback_err)[:120]} (text-only this turn)")
@@ -850,19 +872,10 @@ class EvaLive:
             parts.append(mem_str)
         parts.append(sys_prompt)
 
-        # Native mode: Gemini speaks directly (AUDIO modality + prebuilt voice).
-        # Cloned mode: Gemini replies in TEXT only; EvaLive._receive_audio() synthesizes
-        # that text locally via self._tts_player (XTTS-v2) once each turn completes.
-        if self._voice_mode == "cloned":
-            return types.LiveConnectConfig(
-                response_modalities=["TEXT"],
-                output_audio_transcription={},
-                input_audio_transcription={},
-                system_instruction="\n".join(parts),
-                tools=[{"function_declarations": TOOL_DECLARATIONS}],
-                session_resumption=types.SessionResumptionConfig(),
-            )
-
+        # Only AUDIO is available on the current Live model (see LIVE_MODEL comment above) —
+        # TEXT-capable Live models were retired. Both voice modes therefore request AUDIO;
+        # in cloned mode the native audio is discarded on receipt (_receive_audio) and
+        # self._tts_player (XTTS-v2) speaks the output_audio_transcription text instead.
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             output_audio_transcription={},
@@ -1057,21 +1070,14 @@ class EvaLive:
                     result = "Specify action (add/remove/list) and a topic."
 
             elif name == "shutdown_eva":
-                self.ui.write_log("SYS: Shutdown requested.")
-                async def _do_shutdown():
-                    await self._save_session_summary()
-                    if self.session:
-                        try:
-                            await self.session.send_client_content(
-                                turns={"parts": [{"text": "Say a brief natural goodbye to the user."}]},
-                                turn_complete=True,
-                            )
-                        except Exception:
-                            pass
-                    await asyncio.sleep(1.5)
-                    import os as _os
-                    _os._exit(0)
-                asyncio.create_task(_do_shutdown())
+                # Disabled: this tool call kept firing on its own (Gemini's live STT
+                # hallucinates stray "user" text from background noise, and that text
+                # has repeatedly satisfied even an explicit-exit-word check), silently
+                # killing the whole process mid-diagnosis before real issues (like TTS
+                # load errors) could ever surface. Self-termination via tool call is no
+                # longer trusted — close the app manually (window close / Ctrl+C) instead.
+                print("[EVA] \u26a0\ufe0f shutdown_eva called \u2014 ignoring (self-shutdown via tool call is disabled; close the app manually).")
+                result = "I can't shut myself down right now \u2014 please close the app manually if you want to exit."
 
             else:
                 result = f"Unknown tool: {name}"
@@ -1092,8 +1098,12 @@ class EvaLive:
 
     async def _send_realtime(self):
         while True:
-            msg = await self.out_queue.get()
-            await self.session.send_realtime_input(media=msg)
+            chunk = await self.out_queue.get()
+            # gemini-3.1-flash-live-preview deprecated realtime_input.media_chunks (1007
+            # policy violation) — must use the dedicated audio/video/text keys instead.
+            await self.session.send_realtime_input(
+                audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
+            )
 
     async def _listen_audio(self):
         print("[EVA] 🎤 Mic started")
@@ -1106,7 +1116,7 @@ class EvaLive:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
-                    {"data": data, "mime_type": "audio/pcm"}
+                    data
                 )
 
         try:
@@ -1135,6 +1145,12 @@ class EvaLive:
                     if response.data:
                         if self._interrupted:
                             pass  # discard: interrupted
+                        elif self._voice_mode == "cloned":
+                            # Cloned-voice mode: the session still generates native AUDIO
+                            # (no TEXT-only Live model exists anymore), but we don't want it
+                            # played — self._tts_player (XTTS-v2) speaks the transcript instead
+                            # once the turn completes, below. Just drop the native audio bytes.
+                            pass
                         else:
                             if self._turn_done_event and self._turn_done_event.is_set():
                                 self._turn_done_event.clear()
@@ -1144,16 +1160,6 @@ class EvaLive:
                             _SLICE = 2400
                             for _i in range(0, len(_audio_data), _SLICE):
                                 self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
-
-                    # Cloned-voice mode: response_modalities=["TEXT"] means Gemini never
-                    # sends response.data (no native audio) or output_transcription — the
-                    # spoken text arrives directly as response.text instead. Buffer it the
-                    # same way as out_buf below so logging/session-summary code is shared;
-                    # synthesis is triggered from the turn_complete handler further down.
-                    if getattr(response, "text", None) and not self._interrupted:
-                        txt = _clean_transcript(response.text)
-                        if txt and txt != (out_buf[-1] if out_buf else ""):
-                            out_buf.append(txt)
 
                     if response.server_content:
                         sc = response.server_content
@@ -1207,20 +1213,17 @@ class EvaLive:
                                     asyncio.create_task(self._speak_cloned(full_out))
                             out_buf = []
 
-                            # Vision injection: model finished tool-response turn → now send the image
+                            # Vision injection: model finished tool-response turn — now send the image
                             if self._pending_vision and self.session:
-                                import base64 as _b64
                                 img_b, mime_t, question, angle = self._pending_vision
                                 self._pending_vision = None
-                                b64 = _b64.b64encode(img_b).decode("ascii")
                                 print(f"[Vision] 📤 {len(img_b):,} bytes (angle={angle}) → main session")
-                                await self.session.send_client_content(
-                                    turns={"parts": [
-                                        {"inline_data": {"mime_type": mime_t, "data": b64}},
-                                        {"text": question},
-                                    ]},
-                                    turn_complete=True,
+                                # send_client_content only seeds initial context on this model—
+                                # send the frame then the question as separate realtime inputs.
+                                await self.session.send_realtime_input(
+                                    video=types.Blob(data=img_b, mime_type=mime_t)
                                 )
+                                await self._send_text(question)
                                 # Mark next turn_complete behaviour depending on angle
                                 if self._vision_cam_active:
                                     # Camera: keep busy until EVA finishes speaking the answer
@@ -1254,6 +1257,7 @@ class EvaLive:
 
     async def _play_audio(self):
         print("[EVA] 🔊 Play started")
+        loop = asyncio.get_event_loop()
 
         stream = sd.RawOutputStream(
             samplerate=RECEIVE_SAMPLE_RATE,
@@ -1293,7 +1297,7 @@ class EvaLive:
                         break
 
                 try:
-                    await asyncio.to_thread(stream.write, bytes(batch))
+                    await loop.run_in_executor(self._tts_executor, stream.write, bytes(batch))
                 except (RuntimeError, asyncio.CancelledError):
                     break   # executor shutting down — exit cleanly
         except Exception as e:
@@ -1368,10 +1372,7 @@ class EvaLive:
         if self._turn_done_event:
             self._turn_done_event.clear()
 
-        await self.session.send_client_content(
-            turns={"parts": [{"text": p1}]},
-            turn_complete=True,
-        )
+        await self._send_text(p1)
         self.ui.write_log("SYS: Briefing phase 1 (greeting) sent.")
 
         # ── Phase 2: fire as soon as Phase 1 audio is done ───────────────────
@@ -1422,10 +1423,7 @@ class EvaLive:
                         f"Let the user know briefly.{lang_str}"
                     )
 
-                await self.session.send_client_content(
-                    turns={"parts": [{"text": p2}]},
-                    turn_complete=True,
-                )
+                await self._send_text(p2)
                 self.ui.write_log("SYS: Briefing phase 2 (news) sent.")
             except Exception as e:
                 print(f"[Briefing] Phase 2 error: {e}")
@@ -1482,10 +1480,7 @@ class EvaLive:
             if speaking or (time.monotonic() - self._last_user_speech) < 10:
                 continue
             try:
-                await self.session.send_client_content(
-                    turns={"parts": [{"text": alert}]},
-                    turn_complete=True,
-                )
+                await self._send_text(alert)
             except Exception as e:
                 print(f"[Monitor] ⚠️ Could not send alert: {e}")
 
@@ -1512,10 +1507,7 @@ class EvaLive:
                                 f"Inform the user about this development naturally in {lang}. "
                                 "One brief sentence only."
                             )
-                            await self.session.send_client_content(
-                                turns={"parts": [{"text": msg}]},
-                                turn_complete=True,
-                            )
+                            await self._send_text(msg)
                             self.ui.write_log(f"SYS: Monitor alert sent.")
                             await asyncio.sleep(6)   # gap between consecutive alerts
                     except Exception as e:
@@ -1555,10 +1547,7 @@ class EvaLive:
                     monitors     = monitors or None,
                     recent_turns = recent_turns or None,
                 )
-                await self.session.send_client_content(
-                    turns={"parts": [{"text": prompt}]},
-                    turn_complete=True,
-                )
+                await self._send_text(prompt)
                 self.ui.write_log("SYS: Proactive check-in.")
             except Exception as e:
                 print(f"[Proactive] ⚠️ {e}")
@@ -1604,10 +1593,7 @@ class EvaLive:
                         break
                     await asyncio.sleep(0.1)
                 if self.session:
-                    await self.session.send_client_content(
-                        turns={"parts": [{"text": text}]},
-                        turn_complete=True,
-                    )
+                    await self._send_text(text)
                     self.ui.write_log(f"[Web]: {text}")
                 else:
                     print(f"[Dashboard] Dropped command (no session): {text}")
@@ -1636,6 +1622,18 @@ class EvaLive:
 
         while True:
             try:
+                # Defensive reset: something in the stack (SDK teardown, a package's
+                # atexit hook, etc.) can leave the event loop's shared default
+                # executor permanently shut down — every asyncio.to_thread()/
+                # run_in_executor(None, ...) call afterwards, INCLUDING asyncio's own
+                # internal DNS resolution inside client.aio.live.connect(), then fails
+                # forever with "cannot schedule new futures after shutdown", silently
+                # blocking every reconnect attempt. Swap in a fresh executor before
+                # every connection attempt so a poisoned one can never wedge EVA.
+                self._loop.set_default_executor(
+                    concurrent.futures.ThreadPoolExecutor(thread_name_prefix="eva-default")
+                )
+
                 print("[EVA] Connecting...")
                 self.ui.set_state("THINKING")
                 config = self._build_config()

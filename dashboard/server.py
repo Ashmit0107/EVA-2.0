@@ -620,9 +620,11 @@ class DashboardServer:
                 while True:
                     data = await websocket.receive_bytes()
                     try:
-                        self._phone_audio_queue.put_nowait(
-                            {"data": data, "mime_type": "audio/pcm"}
-                        )
+                        # out_queue (and this queue, relayed into it by _relay_phone_audio)
+                        # now carries raw PCM bytes only — send_realtime_input() wraps them
+                        # in types.Blob itself (gemini-3.1-flash-live-preview requires the
+                        # audio=/video=/text= keys, not the deprecated media_chunks dict).
+                        self._phone_audio_queue.put_nowait(data)
                     except asyncio.QueueFull:
                         pass  # drop frame rather than block
             except WebSocketDisconnect:

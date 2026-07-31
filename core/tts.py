@@ -398,7 +398,7 @@ class XTTSCloneEngine:
         if not speaker_wav or not os.path.isfile(speaker_wav):
             raise RuntimeError(
                 f"Voice sample not found: {speaker_wav!r}. "
-                "Upload or record a 6-30s clip in Settings → Clone my voice."
+                "Upload a 6-30s clip in Settings → Clone my voice."
             )
         self.speaker_wav = speaker_wav
         self.language    = language
@@ -414,12 +414,27 @@ class XTTSCloneEngine:
                 return
             print("[TTS] XTTS-v2 — loading (first run downloads ~2GB model + one-time license prompt)…")
             try:
+                # Coqui's TTS.api blocks on an interactive input() prompt to accept its
+                # non-commercial license the first time a process loads XTTS-v2. Called
+                # from this background thread inside a GUI app, that prompt has no
+                # visible terminal to answer and hangs forever — silently blocking TTS
+                # (and, since set_speaking(True) is already set by the caller, the mic
+                # stays gated the whole time too). Setting this env var makes Coqui
+                # auto-accept and skip the prompt entirely.
+                os.environ.setdefault("COQUI_TOS_AGREED", "1")
                 import torch
                 from TTS.api import TTS as _CoquiTTS
             except ImportError as e:
+                # Surface the REAL missing/broken import instead of a generic message —
+                # coqui-tts/torch can be pip-installed and still fail to import cleanly
+                # (e.g. a version conflict between coqui-tts and a newer transformers),
+                # and the old generic message here made that indistinguishable from
+                # "not installed at all", which wasted a lot of debugging time.
                 raise RuntimeError(
-                    "Voice cloning requires the coqui-tts and torch packages.\n"
-                    "Run: pip install coqui-tts torch soundfile"
+                    f"Voice cloning import failed: {e}\n"
+                    "If coqui-tts/torch/soundfile are already installed, this is likely "
+                    "a version conflict (e.g. with 'transformers') rather than a missing "
+                    "package. Run: pip install coqui-tts torch soundfile"
                 ) from e
             device = "cuda" if torch.cuda.is_available() else "cpu"
             try:
@@ -480,6 +495,7 @@ class TTSPlayer:
             self._engine.speak(text)
         except Exception as e:
             print(f"[TTS] Error: {e}")
+            raise   # let callers (e.g. _speak_cloned's EdgeTTS fallback) see the failure
         finally:
             with self._lock:
                 self._playing = False
